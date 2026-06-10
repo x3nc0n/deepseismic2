@@ -52,7 +52,12 @@ logger = logging.getLogger(__name__)
 # Environment configuration
 # ---------------------------------------------------------------------------
 
-MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
+def _is_mock_mode() -> bool:
+    """Check mock mode at call time (not module import time)."""
+    return os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
+
+
+MOCK_MODE: bool = _is_mock_mode()
 BACKEND_URL: str = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 # ---------------------------------------------------------------------------
@@ -448,7 +453,7 @@ class DeepSeismicAgent:
         self.persona = persona
         self.state = SessionState(persona=persona)
 
-        if MOCK_MODE:
+        if _is_mock_mode():
             logger.info("DeepSeismicAgent: starting in MOCK mode (MOCK_LLM=true)")
             self._impl: MockAgent | FoundryAgent = MockAgent()
         else:
@@ -459,7 +464,7 @@ class DeepSeismicAgent:
     @property
     def is_mock(self) -> bool:
         """True when the agent is running in local mock mode."""
-        return MOCK_MODE
+        return _is_mock_mode()
 
     def chat(self, message: str) -> Generator[str, None, None]:
         """Send a message and yield response text as streaming chunks.

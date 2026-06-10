@@ -140,11 +140,7 @@ class TestEndToEndPipeline:
         """Agent responds in mock LLM mode."""
         import os
 
-        import deepseismic.agent.agent as agent_module
-
         os.environ["MOCK_LLM"] = "true"
-        # Force mock mode (module-level constant cached at import)
-        agent_module.MOCK_MODE = True
 
         from deepseismic.agent.agent import DeepSeismicAgent
 
@@ -159,11 +155,8 @@ class TestEndToEndPipeline:
         """Full chain: user question → agent → API → response."""
         import os
 
-        import deepseismic.agent.agent as agent_module
-
         os.environ["DEEPSEISMIC_MOCK_MODE"] = "true"
         os.environ["MOCK_LLM"] = "true"
-        agent_module.MOCK_MODE = True
 
         from deepseismic.agent.agent import DeepSeismicAgent
 

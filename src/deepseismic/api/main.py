@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from deepseismic.api.dependencies import _build_storage_client, is_mock_mode
 from deepseismic.api.routes import interpretation, surveys, wells
@@ -83,7 +84,14 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
+@app.get("/", include_in_schema=False)
+def root():
+    """Redirect root to interactive API docs."""
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/health", tags=["ops"])
+@app.get("/api/health", tags=["ops"], include_in_schema=False)
 def health() -> dict[str, Any]:
     """Liveness probe used by Docker HEALTHCHECK and load balancers."""
     mock = is_mock_mode()

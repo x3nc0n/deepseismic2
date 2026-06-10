@@ -46,25 +46,63 @@ The current architecture follows the team's agreed direction:
 
 ## Quick start
 
-1. Install Python 3.11.
-2. Create and activate a virtual environment.
-3. Install the project in editable mode with development dependencies.
-4. Populate environment variables for Azure resources.
-5. Add a Volve subset to local development storage or wire the project to ADLS Gen2.
-6. Start implementing ingest, preprocessing, model, API, and agent modules.
+### Prerequisites
 
-Example placeholder setup:
+- Python 3.11+
+- Docker (for Azurite local storage emulator)
 
-```bash
+### Setup
+
+```powershell
+# Clone and install
+git clone https://github.com/x3nc0n/deepseismic2.git
+cd deepseismic2
 python -m venv .venv
 .venv\Scripts\activate
-pip install -e .[dev]
+pip install -e ".[dev,ui]"
+
+# Copy environment template (pre-filled for local dev)
+cp .env.example .env
+
+# Start local storage (Azurite) + create containers + upload sample data
+.\scripts\setup-local.ps1
 ```
 
-## Team perspective
+### Run the demo
 
-This PoC is intentionally simple: prove one end-to-end path that connects seismic data ingest, preprocessing, model inference, API access, and AI-assisted interpretation. Domain grounding is organized around three SME perspectives: geophysics, geology, and geoengineering.
+```powershell
+# Start the API server (mock mode — no real data needed)
+$env:DEEPSEISMIC_MOCK_MODE = "true"
+$env:MOCK_LLM = "true"
+uvicorn deepseismic.api.main:app --reload --port 8000
+
+# In another terminal — pick your UI:
+# Option 1: Terminal chat
+python -m deepseismic.ui.chat
+
+# Option 2: Streamlit (visual demo for geologists)
+streamlit run src/deepseismic/ui/streamlit_app.py
+
+# Option 3: Gradio
+python src/deepseismic/ui/gradio_app.py
+```
+
+### Run tests
+
+```powershell
+python -m pytest src/tests/ -q          # unit tests (no infra needed)
+python -m pytest src/tests/ -m integration  # requires Azurite running
+python -m ruff check src/               # linting
+```
 
 ## Status
 
-This repository is currently scaffolded for implementation. Most Python modules are placeholders with documented responsibilities and planned interfaces so the team can start filling in working code without revisiting the top-level structure.
+**Sprint 1 complete.** Full end-to-end pipeline implemented:
+- ✅ SEG-Y ingest → Zarr conversion with metadata sidecars
+- ✅ Fault label generation from existing interpretations
+- ✅ 3D UNet model with sliding-window inference
+- ✅ FastAPI backend (13 endpoints, mock mode supported)
+- ✅ Foundry agent with 11 tools wired to real API
+- ✅ Three demo UIs: terminal chat, Streamlit, Gradio
+- ✅ 79 tests passing + CI workflow
+- ✅ Local dev environment (Azurite, Docker, zero-config)

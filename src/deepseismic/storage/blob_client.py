@@ -14,6 +14,7 @@ Container conventions (architecture decision):
 
 from __future__ import annotations
 
+import base64 as _b64
 import io
 import os
 from collections.abc import Iterator, MutableMapping
@@ -29,7 +30,6 @@ CONTAINERS: tuple[str, ...] = ("raw", "staged", "features", "results", "catalog"
 
 # Azurite well-known dev credentials — key is the standard emulator key
 # documented at https://learn.microsoft.com/azure/storage/common/storage-use-azurite
-import base64 as _b64
 
 _AZURITE_KEY = _b64.b64decode(
     b"RWJ5OHZkTTAyeE5PY3FGbHFVd0pQTGxtRXRsQ0RYSjFPY0hQa3pWMWtwU3ZC"
@@ -112,7 +112,7 @@ class StorageClient:
 
         account = os.getenv("AZURE_STORAGE_ACCOUNT")
         if not account:
-            raise EnvironmentError(
+            raise OSError(
                 "No storage credentials found. "
                 "Set STORAGE_CONNECTION_STRING (local/Azurite) or "
                 "AZURE_STORAGE_ACCOUNT (cloud with DefaultAzureCredential)."

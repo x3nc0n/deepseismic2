@@ -42,8 +42,9 @@ import json
 import logging
 import os
 import time
+from collections.abc import Generator
 from dataclasses import dataclass, field
-from typing import Any, Generator, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -202,11 +203,11 @@ MOCK_RESPONSES: dict[str, str] = {
 class SessionState:
     """Working memory for a single agent conversation thread."""
 
-    thread_id: Optional[str] = None
-    dataset_id: Optional[str] = None
-    run_id: Optional[str] = None
-    result_id: Optional[str] = None
-    persona: Optional[str] = None  # geophysics | geology | geoengineering
+    thread_id: str | None = None
+    dataset_id: str | None = None
+    run_id: str | None = None
+    result_id: str | None = None
+    persona: str | None = None  # geophysics | geology | geoengineering
     step_history: list[str] = field(default_factory=list)
     tool_call_log: list[dict[str, Any]] = field(default_factory=list)
 
@@ -217,18 +218,18 @@ class SessionState:
 
 def _load_tool_definitions() -> list[dict[str, Any]]:
     """Collect JSON schema tool definitions from all tool modules."""
-    from deepseismic.agent.tools.seismic_tools import SEISMIC_TOOL_DEFINITIONS
     from deepseismic.agent.tools.geological_tools import GEOLOGICAL_TOOL_DEFINITIONS
     from deepseismic.agent.tools.reporting_tools import REPORTING_TOOL_DEFINITIONS
+    from deepseismic.agent.tools.seismic_tools import SEISMIC_TOOL_DEFINITIONS
 
     return SEISMIC_TOOL_DEFINITIONS + GEOLOGICAL_TOOL_DEFINITIONS + REPORTING_TOOL_DEFINITIONS
 
 
 def _dispatch_tool_call(tool_name: str, arguments: dict[str, Any]) -> Any:
     """Route a tool call to its handler and return the result dict."""
-    from deepseismic.agent.tools.seismic_tools import SEISMIC_TOOL_HANDLERS
     from deepseismic.agent.tools.geological_tools import GEOLOGICAL_TOOL_HANDLERS
     from deepseismic.agent.tools.reporting_tools import REPORTING_TOOL_HANDLERS
+    from deepseismic.agent.tools.seismic_tools import SEISMIC_TOOL_HANDLERS
 
     all_handlers: dict[str, Any] = {
         **SEISMIC_TOOL_HANDLERS,
@@ -255,7 +256,7 @@ class MockAgent:
     def chat(
         self,
         message: str,
-        state: Optional[SessionState] = None,  # noqa: ARG002
+        state: SessionState | None = None,  # noqa: ARG002
     ) -> Generator[str, None, None]:
         """Yield a mock response based on keyword matching, word by word."""
         lower = message.lower()
@@ -288,7 +289,7 @@ class FoundryAgent:
 
     AGENT_NAME = "deepseismic-analyst"
 
-    def __init__(self, persona: Optional[str] = None) -> None:
+    def __init__(self, persona: str | None = None) -> None:
         from azure.ai.projects import AIProjectClient
         from azure.identity import DefaultAzureCredential
 
@@ -346,8 +347,8 @@ class FoundryAgent:
     def chat(
         self,
         message: str,
-        thread_id: Optional[str] = None,
-        state: Optional[SessionState] = None,
+        thread_id: str | None = None,
+        state: SessionState | None = None,
     ) -> Generator[str, None, None]:
         """Send a user message and yield assistant response chunks.
 
@@ -443,7 +444,7 @@ class DeepSeismicAgent:
             print(chunk, end="", flush=True)
     """
 
-    def __init__(self, persona: Optional[str] = None) -> None:
+    def __init__(self, persona: str | None = None) -> None:
         self.persona = persona
         self.state = SessionState(persona=persona)
 

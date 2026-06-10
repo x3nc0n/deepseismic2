@@ -20,10 +20,10 @@ import io
 import os
 from typing import Any
 
-import numpy as np
 import gradio as gr
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 
 matplotlib.use("Agg")  # Non-interactive backend for server rendering
@@ -350,7 +350,12 @@ with gr.Blocks(
     )
     clear_btn.click(lambda: ([], ""), outputs=[chatbot, msg_box])
 
-    for btn, label in [(btn_status, "📊 Status"), (btn_wells, "🛢 Wells"), (btn_analyze, "🔍 Full Analysis")]:
+    quick_btns = [
+        (btn_status, "📊 Status"),
+        (btn_wells, "🛢 Wells"),
+        (btn_analyze, "🔍 Full Analysis"),
+    ]
+    for btn, label in quick_btns:
         btn.click(
             lambda h, p, lbl=label: _quick_action(lbl, h),
             inputs=[chatbot, persona_dd],

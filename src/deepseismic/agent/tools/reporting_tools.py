@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -270,7 +270,7 @@ def create_qc_report(
     if MOCK_MODE:
         result = dict(_MOCK_QC_REPORT)
         result["run_id"] = run_id
-        result["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        result["generated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         if not include_recommendations:
             result.pop("recommended_action", None)
         return result

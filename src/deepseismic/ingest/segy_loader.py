@@ -38,7 +38,7 @@ import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import IO
@@ -165,7 +165,7 @@ class SEGYLoader:
 
     # --- context manager ---------------------------------------------------
 
-    def __enter__(self) -> "SEGYLoader":
+    def __enter__(self) -> SEGYLoader:
         self._resolve_path()
         return self
 
@@ -264,23 +264,21 @@ class SEGYLoader:
 
         amplitude: np.ndarray = ds["amplitude"].values  # (IL, XL, T)
 
-        store = zarr.DirectoryStore(str(output_path))
-        root = zarr.open_group(store, mode="w" if overwrite else "w-")
+        store = zarr.storage.LocalStore(str(output_path))
+        root = zarr.open_group(store, mode="w")
 
-        z = root.create_dataset(
+        z = root.create_array(
             "amplitude",
-            data=amplitude,
+            data=amplitude.astype(np.float32),
             chunks=chunks,
-            dtype=np.float32,
-            compressor=zarr.Blosc(cname="lz4", clevel=5, shuffle=zarr.Blosc.SHUFFLE),
             overwrite=overwrite,
         )
         logger.info("Wrote amplitude array → %s  shape=%s", output_path, z.shape)
 
         # Store coordinate 1-D arrays alongside the data for easy access
-        root.create_dataset("inline",    data=geom.inlines[:amplitude.shape[0]],  dtype=np.int32)
-        root.create_dataset("crossline", data=geom.crosslines[:amplitude.shape[1]], dtype=np.int32)
-        root.create_dataset("twtt_ms",   data=geom.times_ms,                      dtype=np.float32)
+        root.create_array("inline",    data=geom.inlines[:amplitude.shape[0]].astype(np.int32))
+        root.create_array("crossline", data=geom.crosslines[:amplitude.shape[1]].astype(np.int32))
+        root.create_array("twtt_ms",   data=geom.times_ms.astype(np.float32))
 
         amp_stats = _compute_amplitude_stats(amplitude)
 
@@ -292,7 +290,7 @@ class SEGYLoader:
         meta = IngestMetadata(
             source_file=src_name,
             source_sha256=sha256,
-            ingested_at=datetime.now(timezone.utc).isoformat(),
+            ingested_at=datetime.now(UTC).isoformat(),
             sample_mode=self.sample_mode,
             n_inlines_loaded=amplitude.shape[0],
             geometry=geom.to_dict(),
@@ -351,9 +349,9 @@ class SEGYLoader:
         volume = np.zeros((n_il, n_xl, n_s), dtype=np.float32)
 
         for il_idx, il_no in enumerate(f.ilines[:n_il]):
-            traces = f.gather[il_no]  # (n_xl_actual, n_s)
+            traces = np.array(f.iline[il_no], dtype=np.float32)  # (n_xl_actual, n_s)
             n_loaded = min(traces.shape[0], n_xl)
-            volume[il_idx, :n_loaded, :] = traces[:n_loaded].astype(np.float32)
+            volume[il_idx, :n_loaded, :] = traces[:n_loaded]
 
         return volume
 

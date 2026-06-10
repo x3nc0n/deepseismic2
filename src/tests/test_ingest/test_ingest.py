@@ -76,12 +76,13 @@ class TestLoadSegyBasic:
     @pytest.mark.integration
     @pytest.mark.skipif(_load_segy is None, reason="load_segy not yet implemented")
     def test_load_segy_basic_real(self, sample_segy_path: Path) -> None:
-        """Real load_segy must return correct shape and all required metadata."""
-        result = _load_segy(str(sample_segy_path))  # type: ignore[misc]
-        assert "volume" in result
-        assert result["volume"].shape == (5, 5, 100)
-        for field in _REQUIRED_METADATA:
-            assert field in result["metadata"], f"Missing metadata field: {field}"
+        """Real load_segy must return (xr.Dataset, SurveyGeometry) with correct shape."""
+        ds, geom = _load_segy(str(sample_segy_path))  # type: ignore[misc]
+        assert "amplitude" in ds.data_vars
+        # Synthetic fixture: 5 inlines x 5 crosslines x 100 samples
+        assert ds["amplitude"].shape == (5, 5, 100)
+        assert geom.n_inlines == 5
+        assert geom.n_crosslines == 5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,11 +128,13 @@ class TestSegyToZarr:
 
     @pytest.mark.integration
     @pytest.mark.skipif(_segy_to_zarr is None, reason="segy_to_zarr not yet implemented")
-    def test_segy_to_zarr_real(self, sample_segy_path: Path, tmp_zarr_store) -> None:
-        """Real segy_to_zarr must write a Zarr array with shape (5, 5, 100)."""
-        result = _segy_to_zarr(str(sample_segy_path), tmp_zarr_store)  # type: ignore[misc]
-        assert hasattr(result, "shape")
-        assert result.shape == (5, 5, 100)
+    def test_segy_to_zarr_real(self, sample_segy_path: Path, tmp_path) -> None:
+        """Real segy_to_zarr must write a Zarr store and return IngestMetadata."""
+        dest = tmp_path / "output.zarr"
+        meta = _segy_to_zarr(str(sample_segy_path), str(dest))  # type: ignore[misc]
+        assert dest.exists()
+        assert hasattr(meta, "n_inlines_loaded")
+        assert meta.n_inlines_loaded == 5
 
 
 # ─────────────────────────────────────────────────────────────────────────────

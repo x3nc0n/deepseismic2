@@ -280,7 +280,8 @@ def get_well_data(
             "count": len(wells),
             "note": "Mock response — Volve field reference wells.",
         }
-    return _get("/api/wells", params={"well_id": well_id, "survey_id": survey_id, "type": well_type})
+    params = {"well_id": well_id, "survey_id": survey_id, "type": well_type}
+    return _get("/api/wells", params=params)
 
 
 def get_formation_tops(well_id: str, formation: str | None = None) -> dict[str, Any]:

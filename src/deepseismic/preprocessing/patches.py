@@ -41,10 +41,10 @@ Usage
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import torch
@@ -245,9 +245,12 @@ class PatchDataset(Dataset):
 
         for il in range(0, n_il - ps_il + 1, st_il):
             il_centre = il + ps_il // 2
-            if   il_centre < il_train_end: spl = Split.TRAIN
-            elif il_centre < il_val_end:   spl = Split.VAL
-            else:                          spl = Split.TEST
+            if il_centre < il_train_end:
+                spl = Split.TRAIN
+            elif il_centre < il_val_end:
+                spl = Split.VAL
+            else:
+                spl = Split.TEST
 
             for xl in range(0, n_xl - ps_xl + 1, st_xl):
                 for s in range(0, n_s - ps_s + 1, st_s):

@@ -17,7 +17,6 @@ Or in mock mode::
 from __future__ import annotations
 
 import os
-import sys
 
 import numpy as np
 import streamlit as st

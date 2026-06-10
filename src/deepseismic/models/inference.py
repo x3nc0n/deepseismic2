@@ -39,8 +39,8 @@ Usage
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import torch
@@ -319,7 +319,7 @@ class VolumeInference:
         checkpoint_path: str | Path,
         device:          str | None = None,
         **inference_kwargs,
-    ) -> "VolumeInference":
+    ) -> VolumeInference:
         """Construct a :class:`VolumeInference` by loading a model checkpoint.
 
         Parameters

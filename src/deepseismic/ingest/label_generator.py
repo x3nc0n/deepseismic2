@@ -149,7 +149,7 @@ class SurveyTransform:
         tie_points: list[tuple[float, float, int, int]],
         sample_rate_ms: float = 4.0,
         datum_ms: float = 0.0,
-    ) -> "SurveyTransform":
+    ) -> SurveyTransform:
         """Construct from three (x, y, inline, crossline) tie-points.
 
         Solves the 2 × 2 linear system that maps (ΔX, ΔY) to (ΔIL, ΔXL).

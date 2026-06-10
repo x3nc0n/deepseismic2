@@ -330,7 +330,7 @@ class UNet3D(nn.Module):
         cls,
         path: str | Path,
         map_location: str | torch.device = "cpu",
-    ) -> "UNet3D":
+    ) -> UNet3D:
         """Load a model from a checkpoint file.
 
         Parameters

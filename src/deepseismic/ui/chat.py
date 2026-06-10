@@ -114,7 +114,10 @@ def _print_user_prompt() -> str:
 
 _COMMAND_MESSAGES: dict[str, str] = {
     "/status": "What is the current status of the latest preprocessing and inference run?",
-    "/interpret": "Analyze the latest Volve run end-to-end: check data, QC, results, and give me a handoff note.",
+    "/interpret": (
+        "Analyze the latest Volve run end-to-end: check data, QC, results, "
+        "and give me a handoff note."
+    ),
     "/wells": "Show me the well inventory linked to the current survey.",
 }
 

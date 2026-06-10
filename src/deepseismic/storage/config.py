@@ -13,14 +13,13 @@ Usage::
 
 from __future__ import annotations
 
+# Azurite well-known dev credentials — key is the standard emulator key
+# documented at https://learn.microsoft.com/azure/storage/common/storage-use-azurite
+import base64 as _b64
 from functools import lru_cache
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# Azurite well-known dev credentials — key is the standard emulator key
-# documented at https://learn.microsoft.com/azure/storage/common/storage-use-azurite
-import base64 as _b64
 
 _AZURITE_KEY = _b64.b64decode(
     b"RWJ5OHZkTTAyeE5PY3FGbHFVd0pQTGxtRXRsQ0RYSjFPY0hQa3pWMWtwU3ZC"

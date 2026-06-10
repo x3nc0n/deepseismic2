@@ -12,3 +12,5 @@
 
 ## Learnings
 
+- **2026-06-10:** Well-seismic tie first, then structural, then facies. Wells: 15/9-19A, 19BT2, 19SR.
+

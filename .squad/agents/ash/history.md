@@ -11,3 +11,5 @@
 
 ## Learnings
 
+- **2026-06-10:** ST10010 PSDM recommended as primary PoC volume.
+

@@ -10,3 +10,5 @@
 
 ## Learnings
 
+- **2026-06-10:** Foundry-first decision locked. SharePoint removed. Azure AI Search for grounding.
+

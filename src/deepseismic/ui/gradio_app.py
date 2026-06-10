@@ -159,9 +159,9 @@ def _render_section_image(
 
 def _chat(
     message: str,
-    history: list[list[str]],
+    history: list[dict[str, str]],
     persona: str,
-) -> tuple[list[list[str]], str]:
+) -> tuple[list[dict[str, str]], str]:
     """Send a message to the agent and return updated history."""
     if not message.strip():
         return history, ""
@@ -187,7 +187,10 @@ def _chat(
         chunks.append(chunk)
     response = "".join(chunks)
 
-    history = history + [[message, response]]
+    history = history + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": response},
+    ]
     return history, ""
 
 
@@ -199,12 +202,12 @@ def _update_viewer(
     return _render_section_image(inline, show_overlay)
 
 
-def _quick_action(action: str, history: list[list[str]]) -> tuple[list[list[str]], str]:
+def _quick_action(action: str, history: list[dict[str, str]]) -> tuple[list[dict[str, str]], str]:
     """Process a quick-action button and inject the canned question."""
     messages = {
-        "📊 Status": "What is the current status of the latest preprocessing and inference run?",
-        "🛢 Wells": "Show me the well inventory linked to the current survey.",
-        "🔍 Full Analysis": (
+        "Status": "What is the current status of the latest preprocessing and inference run?",
+        "Wells": "Show me the well inventory linked to the current survey.",
+        "Full Analysis": (
             "Analyze the latest Volve run end-to-end: check data, QC, results, "
             "and give me an analyst handoff note."
         ),
@@ -339,9 +342,9 @@ with gr.Blocks(
     clear_btn.click(lambda: ([], ""), outputs=[chatbot, msg_box])
 
     quick_btns = [
-        (btn_status, "📊 Status"),
-        (btn_wells, "🛢 Wells"),
-        (btn_analyze, "🔍 Full Analysis"),
+        (btn_status, "Status"),
+        (btn_wells, "Wells"),
+        (btn_analyze, "Full Analysis"),
     ]
     for btn, label in quick_btns:
         btn.click(

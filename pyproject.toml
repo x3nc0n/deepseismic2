@@ -30,6 +30,7 @@ dependencies = [
   "azure-search-documents>=11.6.0b4",
   "matplotlib>=3.9.0",
   "plotly>=5.23.0",
+  "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +43,6 @@ dev = [
 ui = [
   "streamlit>=1.38.0",
   "gradio>=4.40.0",
-  "httpx>=0.27.0",
 ]
 
 [tool.hatch.build.targets.wheel]

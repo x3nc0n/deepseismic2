@@ -144,3 +144,55 @@
 - Inbox merge: Complete (7 files → 1 decisions.md).
 - Deduplication: M365 path superseded; Foundry-first locked in.
 - Ready for orchestration log, session log, and cross-agent history updates.
+
+---
+
+## 2026-06-09: API Wiring — Agent Tools to Live FastAPI Endpoints [Lambert]
+
+**Date:** 2026-06-09T23:39:54-05:00 (overnight sprint)
+
+### Shared `_api_client.py`
+
+Created `src/deepseismic/agent/tools/_api_client.py` as the single HTTP client
+for all tool modules. Exposes `get()`, `get_list()`, `post()`, and `APIError`.
+Reads base URL from `DEEPSEISMIC_API_URL` → `BACKEND_URL` → `http://localhost:8000`
+at call time. Retries up to 2× on network errors and HTTP 503; raises `APIError`
+on all failure paths. Promoted `httpx` from the `[ui]` optional group to core
+dependencies.
+
+### seismic_tools.py endpoint corrections
+
+| Function | Before (broken) | After (live) |
+|---|---|---|
+| `query_survey_metadata` | `GET /api/datasets` | `GET /api/surveys` |
+| `get_inline_section` | `GET /api/datasets/{id}/inline/{n}` | `GET /api/surveys/{id}/inline/{n}` |
+| `run_fault_detection` | `POST /api/runs/fault-detection` | `POST /api/interpretation/fault-detection` |
+| `get_interpretation_status` | `GET /api/runs/{run_id}` | `GET /api/interpretation/{run_id}/status` |
+
+### geological_tools.py endpoint corrections
+
+| Function | Before (broken) | After (live) |
+|---|---|---|
+| `get_well_data` | `GET /api/wells?well_id=` (params) | `GET /api/wells/{id}` or `GET /api/wells` |
+| `get_formation_tops` | `GET /api/wells/{id}/formation-tops` | `GET /api/wells/{id}` → extract `formation_tops` |
+| `correlate_wells` | `POST /api/wells/correlate` | Per-well `GET /api/wells/{id}` + `GET /api/wells/{id}/logs` |
+| `get_regional_context` | `GET /api/knowledge/regional-context` | Embedded reference data (no endpoint needed) |
+
+### reporting_tools.py — composed from available endpoints
+
+No dedicated reporting endpoints exist. All three tools now compose from
+`GET /api/interpretation/{run_id}/status` and `.../results`.
+
+| Function | Before (broken) | After (live) |
+|---|---|---|
+| `generate_summary` | `GET /api/results/{id}/summary` | `GET /api/interpretation/{run_id}/results` |
+| `export_interpretation` | `POST /api/results/{id}/export` | status + results aggregated |
+| `create_qc_report` | `GET /api/runs/{run_id}/qc-report` | status + results aggregated |
+
+### Mock fallback
+
+`MOCK_LLM=true` still returns canned Volve reference data with zero HTTP calls.
+When the API is unreachable in live mode, `APIError` is caught and tools return
+`{"error": ..., "available": False}` for graceful degradation.
+
+**Tests:** 79 pass, 5 skipped (infra-dependent). All ruff checks clean.

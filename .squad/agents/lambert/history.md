@@ -12,6 +12,14 @@
 
 - **2026-06-10:** Foundry-first decision locked. SharePoint removed. Azure AI Search for grounding.
 
+- **2026-06-09 (overnight sprint):** Wired agent tool modules to real FastAPI endpoints. Key decisions:
+  - **`_api_client.py` shared client:** Created `src/deepseismic/agent/tools/_api_client.py` with `get()`, `get_list()`, `post()` helpers. Reads base URL from `DEEPSEISMIC_API_URL` → `BACKEND_URL` → `http://localhost:8000` at call time. Retries up to 2× on `httpx.RequestError` and HTTP 503 with linear back-off. Raises `APIError` so all callers can return `{"error": ..., "available": False}` uniformly. Moved `httpx` from `ui` optional dep to core `pyproject.toml` dependencies since agent tools need it.
+  - **seismic_tools.py:** `query_survey_metadata` → `GET /api/surveys` (client-side filter by name); `get_inline_section` → `GET /api/surveys/{id}/inline/{n}`; `run_fault_detection` → `POST /api/interpretation/fault-detection` (maps `model_version` to `checkpoint_blob` path); `get_interpretation_status` → `GET /api/interpretation/{run_id}/status`.
+  - **geological_tools.py:** `get_well_data` → `GET /api/wells/{id}` (single) or `GET /api/wells` (list); `get_formation_tops` → `GET /api/wells/{id}` and extract `formation_tops`; `correlate_wells` → per-well `GET /api/wells/{id}` + `GET /api/wells/{id}/logs`, compute depth stats client-side; `get_regional_context` → stays as embedded knowledge-base (no live endpoint exists or needed).
+  - **reporting_tools.py:** No dedicated summary/export/QC endpoints exist — all three tools compose their responses from `GET /api/interpretation/{run_id}/status` and `GET /api/interpretation/{run_id}/results`. `generate_summary` formats `InterpretationResult` into an analyst-readable summary dict; `export_interpretation` aggregates status+results into an artifact manifest; `create_qc_report` builds sections from status+results with pass/fail/pending states.
+  - **Mock fallback:** All tools check `MOCK_MODE` at call time (not import time) so `MOCK_LLM=true` works even after the module has been imported. When the API is unreachable in live mode, `APIError` is caught and the tool returns `{"error": ..., "available": False}` so the agent can degrade gracefully.
+  - **Tests:** 79 pass, 5 skipped (infra-dependent). All ruff checks clean.
+
 - **2026-06-09:** Implemented full Foundry agent and three demo UIs. Key patterns:
   - **Agent structure:** `DeepSeismicAgent` façade delegates to `MockAgent` (MOCK_LLM=true) or `FoundryAgent` (live). Both expose the same `chat()` streaming generator so all UIs are mode-agnostic.
   - **Tool registry:** Three tool modules (`seismic_tools`, `geological_tools`, `reporting_tools`) each export `*_TOOL_DEFINITIONS` (JSON schema for Foundry registration) and `*_TOOL_HANDLERS` (callable dict for local dispatch). Agent collects all definitions at boot and dispatches tool calls through `_dispatch_tool_call()`.

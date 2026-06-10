@@ -22,42 +22,13 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
+from deepseismic.agent.tools._api_client import APIError
+from deepseismic.agent.tools._api_client import get as _api_get
+from deepseismic.agent.tools._api_client import post as _api_post  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
-BACKEND_URL: str = os.environ.get("BACKEND_URL", "http://localhost:8000")
-_HTTP_TIMEOUT: float = 20.0
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    url = f"{BACKEND_URL}{path}"
-    try:
-        resp = httpx.get(url, params=params, timeout=_HTTP_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.RequestError as exc:
-        logger.warning("Backend unreachable at %s: %s", url, exc)
-        return {"error": str(exc), "available": False}
-    except httpx.HTTPStatusError as exc:
-        return {"error": f"HTTP {exc.response.status_code}", "available": False}
-
-
-def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    url = f"{BACKEND_URL}{path}"
-    try:
-        resp = httpx.post(url, json=payload, timeout=_HTTP_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.RequestError as exc:
-        return {"error": str(exc)}
-    except httpx.HTTPStatusError as exc:
-        return {"error": f"HTTP {exc.response.status_code}"}
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +168,46 @@ def generate_summary(
         if not include_caveats:
             result.pop("caveats", None)
         return result
-    return _get(f"/api/results/{result_id}/summary")
+    # Treat result_id as run_id — GET /api/interpretation/{run_id}/results
+    run_id = result_id
+    try:
+        results = _api_get(f"/api/interpretation/{run_id}/results")
+        fault_fraction = results.get("fault_voxel_fraction", 0.0)
+        key_findings: list[str] = [
+            f"Fault probability volume: {results.get('prob_zarr_path', 'N/A')}",
+            f"Fault mask volume: {results.get('mask_zarr_path', 'N/A')}",
+            f"Fault voxel fraction: {fault_fraction:.4f}",
+        ]
+        if results.get("download_url"):
+            key_findings.append(f"Download URL: {results['download_url']}")
+        out: dict[str, Any] = {
+            "result_id": result_id,
+            "run_id": results.get("run_id", run_id),
+            "dataset_id": results.get("survey_id"),
+            "status": results.get("status"),
+            "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "summary": (
+                f"Fault detection run {run_id} completed on survey "
+                f"{results.get('survey_id', 'unknown')}. "
+                f"Fault voxel fraction: {fault_fraction:.4f}. "
+                f"Completed at: {results.get('completed_at', 'N/A')}."
+            ),
+            "key_findings": key_findings,
+            "qc_stats": {
+                "fault_voxel_fraction": fault_fraction,
+                "prob_zarr_path": results.get("prob_zarr_path"),
+                "mask_zarr_path": results.get("mask_zarr_path"),
+                "completed_at": results.get("completed_at"),
+            },
+        }
+        if include_caveats:
+            out["caveats"] = [
+                "This describes model output, not confirmed geological truth.",
+                "Analyst review is required before sign-off.",
+            ]
+        return out
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 def export_interpretation(
@@ -234,13 +244,37 @@ def export_interpretation(
                 a for a in result["included_artifacts"] if "qc" not in a.lower()
             ]
         return result
-    return _post(
-        f"/api/results/{result_id}/export",
-        {
+    # Aggregate status + results into an export package — no dedicated export endpoint exists yet.
+    run_id = result_id
+    try:
+        status_data = _api_get(f"/api/interpretation/{run_id}/status")
+        results = _api_get(f"/api/interpretation/{run_id}/results")
+        artifacts: list[str] = [
+            f"fault_prob.zarr — {results.get('prob_zarr_path', 'N/A')}",
+            f"fault_mask.zarr — {results.get('mask_zarr_path', 'N/A')}",
+            f"run_status.json (status={status_data.get('status', 'unknown')})",
+        ]
+        if include_qc_overlays:
+            artifacts.append(
+                f"overlay/{run_id}/{{inline}} — "
+                f"GET /api/interpretation/{run_id}/overlay/{{inline}}"
+            )
+        if results.get("download_url"):
+            artifacts.append(f"download_url: {results['download_url']}")
+        return {
+            "export_id": f"export-{run_id}",
+            "result_id": result_id,
+            "run_id": run_id,
             "format": export_format,
-            "include_qc_overlays": include_qc_overlays,
-        },
-    )
+            "survey_id": results.get("survey_id"),
+            "status": results.get("status"),
+            "fault_voxel_fraction": results.get("fault_voxel_fraction"),
+            "included_artifacts": artifacts,
+            "package_path": results.get("prob_zarr_path", f"results/interpretation/{run_id}/"),
+            "completed_at": results.get("completed_at"),
+        }
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 def create_qc_report(
@@ -274,8 +308,79 @@ def create_qc_report(
         if not include_recommendations:
             result.pop("recommended_action", None)
         return result
-    params = {"include_recommendations": str(include_recommendations).lower()}
-    return _get(f"/api/runs/{run_id}/qc-report", params=params)
+    try:
+        status_data = _api_get(f"/api/interpretation/{run_id}/status")
+        job_status = status_data.get("status", "unknown")
+        is_complete = job_status == "complete"
+        has_error = bool(status_data.get("error"))
+
+        sections: list[dict[str, Any]] = [
+            {
+                "title": "Run Status",
+                "status": "pass" if is_complete and not has_error else (
+                    "fail" if has_error else "pending"
+                ),
+                "details": (
+                    f"Run {run_id} — status: {job_status}. "
+                    f"Survey: {status_data.get('survey_id', 'unknown')}. "
+                    f"Progress: {status_data.get('progress_pct', 0):.0f}%."
+                    + (f" Error: {status_data['error']}." if has_error else "")
+                    + (f" {status_data['message']}." if status_data.get("message") else "")
+                ),
+            }
+        ]
+
+        if is_complete:
+            try:
+                results = _api_get(f"/api/interpretation/{run_id}/results")
+                sections.append({
+                    "title": "Inference Results",
+                    "status": "pass",
+                    "details": (
+                        f"Fault probability volume: {results.get('prob_zarr_path', 'N/A')}. "
+                        f"Fault mask volume: {results.get('mask_zarr_path', 'N/A')}. "
+                        f"Fault voxel fraction: {results.get('fault_voxel_fraction', 0.0):.4f}. "
+                        f"Completed at: {results.get('completed_at', 'N/A')}."
+                    ),
+                })
+            except APIError as exc:
+                sections.append({
+                    "title": "Inference Results",
+                    "status": "fail",
+                    "details": f"Could not retrieve result metadata: {exc}",
+                })
+
+        overall = (
+            "pass" if is_complete and not has_error
+            else "fail" if has_error
+            else "pending"
+        )
+        out: dict[str, Any] = {
+            "report_id": f"qc-report-{run_id}",
+            "run_id": run_id,
+            "dataset_id": status_data.get("survey_id"),
+            "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "sections": sections,
+            "overall_status": overall,
+            "caveats": [
+                "QC pass does not imply geological correctness.",
+                "Model output requires qualified geoscientist review before use.",
+            ],
+        }
+        if include_recommendations:
+            if is_complete:
+                out["recommended_action"] = (
+                    "Review fault probability overlays for each inline of interest "
+                    f"via GET /api/interpretation/{run_id}/overlay/{{inline}}. "
+                    "Compare against well formation tops before analyst sign-off."
+                )
+            else:
+                out["recommended_action"] = (
+                    f"Wait for run to complete — current status: {job_status}."
+                )
+        return out
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 # ---------------------------------------------------------------------------

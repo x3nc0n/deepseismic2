@@ -24,31 +24,14 @@ import logging
 import os
 from typing import Any
 
-import httpx
+from deepseismic.agent.tools._api_client import APIError
+from deepseismic.agent.tools._api_client import get as _api_get
+from deepseismic.agent.tools._api_client import get_list as _api_get_list
+from deepseismic.agent.tools._api_client import post as _api_post
 
 logger = logging.getLogger(__name__)
 
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
-BACKEND_URL: str = os.environ.get("BACKEND_URL", "http://localhost:8000")
-_HTTP_TIMEOUT: float = 15.0
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Issue a GET to the FastAPI backend and return the parsed response."""
-    url = f"{BACKEND_URL}{path}"
-    try:
-        resp = httpx.get(url, params=params, timeout=_HTTP_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.RequestError as exc:
-        logger.warning("Backend unreachable at %s: %s", url, exc)
-        return {"error": str(exc), "available": False}
-    except httpx.HTTPStatusError as exc:
-        return {"error": f"HTTP {exc.response.status_code}", "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +152,18 @@ def query_survey_metadata(
         if format and format != "any":
             surveys = [s for s in surveys if format in s["formats"]]
         return {**_MOCK_SURVEY_METADATA, "surveys": surveys, "count": len(surveys)}
-    return _get("/api/datasets", params={"name": survey_name, "format": format})
+    try:
+        items = _api_get_list("/api/surveys")
+        if survey_name:
+            items = [
+                s for s in items
+                if survey_name.lower() in (
+                    s.get("survey_id", "") + s.get("source_file", "")
+                ).lower()
+            ]
+        return {"surveys": items, "count": len(items)}
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 def get_inline_section(survey_id: str, inline_number: int) -> dict[str, Any]:
@@ -190,7 +184,10 @@ def get_inline_section(survey_id: str, inline_number: int) -> dict[str, Any]:
     """
     if MOCK_MODE:
         return {**_MOCK_INLINE_SECTION, "inline": inline_number, "survey_id": survey_id}
-    return _get(f"/api/datasets/{survey_id}/inline/{inline_number}")
+    try:
+        return _api_get(f"/api/surveys/{survey_id}/inline/{inline_number}")
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 def run_fault_detection(
@@ -219,18 +216,15 @@ def run_fault_detection(
     if MOCK_MODE:
         return {**_MOCK_FAULT_DETECTION, "survey_id": survey_id, "model": model_version}
 
-    payload: dict[str, Any] = {"survey_id": survey_id, "model_version": model_version}
+    payload: dict[str, Any] = {"survey_id": survey_id}
+    # Map model_version to a checkpoint blob path when non-default
+    if model_version and model_version != "unet-fault-v1":
+        payload["checkpoint_blob"] = f"checkpoints/{model_version}.pt"
     if inline_range:
         payload["inline_range"] = inline_range
     try:
-        resp = httpx.post(
-            f"{BACKEND_URL}/api/runs/fault-detection",
-            json=payload,
-            timeout=_HTTP_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        return _api_post("/api/interpretation/fault-detection", payload)
+    except APIError as exc:
         return {"error": str(exc)}
 
 
@@ -252,7 +246,10 @@ def get_interpretation_status(run_id: str) -> dict[str, Any]:
     """
     if MOCK_MODE:
         return {**_MOCK_INTERP_STATUS, "run_id": run_id}
-    return _get(f"/api/runs/{run_id}")
+    try:
+        return _api_get(f"/api/interpretation/{run_id}/status")
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 # ---------------------------------------------------------------------------

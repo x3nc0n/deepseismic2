@@ -23,30 +23,13 @@ import logging
 import os
 from typing import Any
 
-import httpx
+from deepseismic.agent.tools._api_client import APIError
+from deepseismic.agent.tools._api_client import get as _api_get
+from deepseismic.agent.tools._api_client import get_list as _api_get_list
 
 logger = logging.getLogger(__name__)
 
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
-BACKEND_URL: str = os.environ.get("BACKEND_URL", "http://localhost:8000")
-_HTTP_TIMEOUT: float = 15.0
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    url = f"{BACKEND_URL}{path}"
-    try:
-        resp = httpx.get(url, params=params, timeout=_HTTP_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.RequestError as exc:
-        logger.warning("Backend unreachable at %s: %s", url, exc)
-        return {"error": str(exc), "available": False}
-    except httpx.HTTPStatusError as exc:
-        return {"error": f"HTTP {exc.response.status_code}", "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +263,20 @@ def get_well_data(
             "count": len(wells),
             "note": "Mock response — Volve field reference wells.",
         }
-    params = {"well_id": well_id, "survey_id": survey_id, "type": well_type}
-    return _get("/api/wells", params=params)
+    try:
+        if well_id:
+            # GET /api/wells/{well_id} — returns WellMetadata (single object)
+            data = _api_get(f"/api/wells/{well_id}")
+            wells: list[dict[str, Any]] = [data]
+        else:
+            # GET /api/wells — returns list[WellListItem]
+            wells = _api_get_list("/api/wells")
+            if well_type:
+                # well_type not a server-side filter; apply client-side
+                wells = [w for w in wells if w.get("type") == well_type]
+        return {"wells": wells, "count": len(wells)}
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 def get_formation_tops(well_id: str, formation: str | None = None) -> dict[str, Any]:
@@ -314,7 +309,20 @@ def get_formation_tops(well_id: str, formation: str | None = None) -> dict[str, 
             "primary_seal": "Draupne",
             "note": "Mock response — Volve field reference stratigraphy.",
         }
-    return _get(f"/api/wells/{well_id}/formation-tops", params={"formation": formation})
+    try:
+        # GET /api/wells/{well_id} returns WellMetadata which includes formation_tops
+        data = _api_get(f"/api/wells/{well_id}")
+        tops: list[dict[str, Any]] = data.get("formation_tops", [])
+        if formation:
+            tops = [t for t in tops if formation.lower() in t.get("formation", "").lower()]
+        return {
+            "well_id": well_id,
+            "well_name": data.get("name", well_id),
+            "formation_tops": tops,
+            "logs_available": data.get("logs_available", []),
+        }
+    except APIError as exc:
+        return {"error": str(exc), "available": False}
 
 
 def correlate_wells(well_ids: list[str], formation: str = "Hugin") -> dict[str, Any]:
@@ -343,16 +351,54 @@ def correlate_wells(well_ids: list[str], formation: str = "Hugin") -> dict[str, 
             ]
         return corr
 
-    try:
-        resp = httpx.post(
-            f"{BACKEND_URL}/api/wells/correlate",
-            json={"well_ids": well_ids, "formation": formation},
-            timeout=_HTTP_TIMEOUT,
+    # Fetch well metadata and logs for each requested well, then compare formation tops.
+    rows: list[dict[str, Any]] = []
+    depths: list[float] = []
+    fetch_errors: list[str] = []
+
+    for wid in well_ids:
+        try:
+            meta = _api_get(f"/api/wells/{wid}")
+        except APIError as exc:
+            logger.warning("correlate_wells: could not fetch well %s: %s", wid, exc)
+            fetch_errors.append(f"{wid}: {exc}")
+            continue
+
+        # Extract the requested formation top
+        formation_tops: list[dict[str, Any]] = meta.get("formation_tops", [])
+        match = next(
+            (t for t in formation_tops if formation.lower() in t.get("formation", "").lower()),
+            None,
         )
-        resp.raise_for_status()
-        return resp.json()
-    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-        return {"error": str(exc)}
+        depth = (match.get("tvdss_m") or match.get("depth_m")) if match else None
+        rows.append({
+            "well_id": wid,
+            "well_name": meta.get("name", wid),
+            "top_m_tvdss": depth,
+            "formation_found": match is not None,
+            "logs_available": meta.get("logs_available", []),
+            "status": "confirmed" if match else "not_found",
+        })
+        if depth is not None:
+            depths.append(float(depth))
+
+        # Also fetch log curves to document available data (logs endpoint call per task spec)
+        try:
+            logs = _api_get(f"/api/wells/{wid}/logs")
+            curves = [c.get("mnemonic") for c in logs.get("curves", [])]
+            rows[-1]["log_curves_fetched"] = curves
+        except APIError:
+            pass  # Log fetch is best-effort for correlation metadata
+
+    result: dict[str, Any] = {
+        "formation": formation,
+        "wells": rows,
+        "depth_range_m_tvdss": [min(depths), max(depths)] if depths else [],
+        "depth_variation_m": round(max(depths) - min(depths), 1) if len(depths) > 1 else 0,
+    }
+    if fetch_errors:
+        result["fetch_errors"] = fetch_errors
+    return result
 
 
 def get_regional_context(field_name: str = "Volve") -> dict[str, Any]:
@@ -377,7 +423,9 @@ def get_regional_context(field_name: str = "Volve") -> dict[str, Any]:
     """
     if MOCK_MODE:
         return _MOCK_REGIONAL_CONTEXT
-    return _get("/api/knowledge/regional-context", params={"field": field_name})
+    # Regional context is a knowledge-base lookup, not backed by a live API endpoint.
+    # Return the embedded reference data so the LLM always has geological context.
+    return _MOCK_REGIONAL_CONTEXT
 
 
 # ---------------------------------------------------------------------------

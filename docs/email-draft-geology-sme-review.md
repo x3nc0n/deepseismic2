@@ -42,5 +42,25 @@ When you review someone else's interpretation, what do you look for? What are th
 
 No rush — just thinking out loud at this stage. Happy to jump on a call if that's easier than typing it all out.
 
+---
+
+**6. Reaction to a demo scenario**
+
+Here's what I'm envisioning for a 5-minute demonstration of the modernized workflow. Tell me if this feels realistic or if I'm missing steps a real interpreter would need:
+
+1. **Ingest & QC** — A real North Sea SEG-Y (from the Volve field) gets uploaded to cheap cloud storage. The system automatically runs quality checks (bandwidth, noise, amplitude statistics) and reports readiness.
+
+2. **Regional context** — A geologist new to the basin asks the AI assistant: "What's the geological setting here?" The assistant explains the Viking Graben structure, expected Jurassic depositional systems, which horizons to look for, and typical fault styles — essentially bridging the regional knowledge gap in seconds.
+
+3. **AI-assisted interpretation** — The system generates a fault probability volume (using a neural network trained on fault patterns) and suggests horizon picks for key surfaces like Top Hugin. The geologist validates and edits rather than picking from scratch.
+
+4. **Well tie & calibration** — The system auto-generates synthetic seismograms for available wells and correlates them to the seismic. The geologist reviews tie quality rather than manually building it from scratch.
+
+5. **Summary & handoff** — The assistant generates a structured interpretation summary with findings, confidence levels, caveats, and recommended next steps. Ready for peer review or management reporting.
+
+**My question:** Does this sequence match how you'd actually approach a new interpretation? What's missing? What would make you not trust it? Where would you absolutely need to intervene manually vs. where you'd trust an automated first pass?
+
+---
+
 Thanks,
 Jos

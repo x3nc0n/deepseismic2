@@ -1,7 +1,17 @@
-"""FastAPI application entry point.
+"""FastAPI application entry point."""
 
-This module will assemble the FastAPI app, register route groups, configure shared
-dependencies, and expose service metadata for health and version endpoints.
-Planned interfaces include app-factory construction and environment-aware startup
-hooks for storage, run tracking, and agent integration.
-"""
+from __future__ import annotations
+
+from fastapi import FastAPI
+
+app = FastAPI(
+    title="deepseismic2",
+    description="Cloud-native seismic interpretation PoC",
+    version="0.1.0",
+)
+
+
+@app.get("/health", tags=["ops"])
+def health() -> dict[str, str]:
+    """Liveness probe used by Docker HEALTHCHECK and load balancers."""
+    return {"status": "ok"}

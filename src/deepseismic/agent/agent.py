@@ -1,7 +1,506 @@
-"""Foundry agent configuration placeholder.
+"""DeepSeismic Analyst agent — Azure AI Foundry Agent Service.
 
-This module will define the DeepSeismic2 analyst agent, including system behavior,
-registered tools, and knowledge sources indexed through Azure AI Search. Planned
-interfaces include agent bootstrap configuration, tool registration, and grounding
-asset selection for geophysics, geology, and geoengineering use cases.
+Bootstraps the DeepSeismic Analyst agent using the ``azure-ai-projects`` SDK.
+The agent acts as an AI-native analyst assistant grounded by:
+
+* **Azure AI Search** over indexed markdown knowledge (methods, glossary, runbooks)
+* **FastAPI tool calls** for live dataset, run, QC, and result data
+
+Supports local mock mode via ``MOCK_LLM=true`` for offline iteration without
+Azure credentials or live backend services.
+
+Usage
+-----
+Run a single conversation turn::
+
+    from deepseismic.agent.agent import DeepSeismicAgent
+
+    agent = DeepSeismicAgent()
+    for chunk in agent.chat("What data is loaded for the Volve survey?"):
+        print(chunk, end="", flush=True)
+
+Run a multi-step end-to-end workflow::
+
+    for chunk in agent.chat("Analyze the latest Volve run end-to-end."):
+        print(chunk, end="", flush=True)
+
+Environment variables
+---------------------
+``MOCK_LLM``
+    Set to ``"true"`` to bypass Azure calls and return canned responses.
+``AZURE_PROJECT_ENDPOINT``
+    Azure AI Foundry project endpoint URL.
+``AZURE_OPENAI_MODEL``
+    Model deployment name (default: ``"gpt-4o"``).
+``BACKEND_URL``
+    FastAPI backend base URL (default: ``"http://localhost:8000"``).
 """
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Any, Generator, Optional
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Environment configuration
+# ---------------------------------------------------------------------------
+
+MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
+BACKEND_URL: str = os.environ.get("BACKEND_URL", "http://localhost:8000")
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """\
+You are the DeepSeismic Analyst, an AI assistant helping petroleum geoscientists
+interpret 3D seismic data from the Volve field proof-of-concept.
+
+## Core Role
+Guide analysts through a four-step interpretation workflow:
+1. **Ingest**    — verify data availability and preprocessing status
+2. **Interpret** — summarize model outputs, flag anomalies, cite evidence
+3. **Validate**  — surface QC artifacts and highlight confidence limits
+4. **Report**    — generate analyst handoff notes with structured findings
+
+## Grounding Rules
+- Ground every factual claim in tool output or indexed documentation.
+- Never claim subsurface truth that is not supported by evidence.
+- Distinguish clearly: observed evidence | interpretation guidance | caveats | next steps.
+- When uncertainty exists, state it explicitly.
+
+## Domain Perspectives
+You answer from three expert viewpoints — declare your perspective on substantive questions:
+
+**Ash / Geophysics**
+  Focus: data quality, amplitude reliability, signal behavior, acquisition and processing caveats.
+  Triggers: amplitude, waveform, QC, reliability, noise, signal, acquisition.
+
+**Kane / Geology**
+  Focus: facies meaning, depositional interpretation, structural context, lithology.
+  Triggers: facies, depositional, lithology, structure, formation, stratigraphy.
+
+**Brett / Geoengineering**
+  Focus: reservoir development implications, production impact, operational uncertainty.
+  Triggers: production, completion, reservoir, operations, development, well.
+
+If a question is ambiguous, state your default perspective and offer the other two views.
+
+## Response Structure
+For substantive answers, use this structure:
+1. **Observed Evidence** — facts from tools or indexed documentation
+2. **Interpretation**    — what the evidence likely means in analyst language
+3. **Caveats**          — what remains uncertain or requires expert review
+4. **Recommended Next Step** — what the analyst should do next
+
+## Safety Boundaries
+- LLMs assist; they do not replace deterministic seismic interpretation.
+- Do not assert a fault, reservoir, or geological feature exists without tool confirmation.
+- Recommend expert review before any operational or development decision.
+- When tool data is missing, say so clearly — do not speculate from partial metadata.
+"""
+
+# Discipline-specific additions appended when a persona is active
+PERSONA_SUPPLEMENTS: dict[str, str] = {
+    "geophysics": (
+        "\n## Active Perspective: Ash / Geophysics\n"
+        "Prioritize signal quality evidence, QC artifact review, and amplitude "
+        "reliability assessment. Surface acquisition or processing caveats before "
+        "drawing geological conclusions."
+    ),
+    "geology": (
+        "\n## Active Perspective: Kane / Geology\n"
+        "Prioritize facies classification, depositional interpretation, and structural "
+        "context. Reference indexed methodology and model cards. Distinguish model "
+        "labels from confirmed subsurface interpretation."
+    ),
+    "geoengineering": (
+        "\n## Active Perspective: Brett / Geoengineering\n"
+        "Prioritize reservoir-development and production-impact framing. Translate "
+        "seismic results into engineering-relevant risk language. Specify what "
+        "additional well, petrophysical, or reservoir evidence is needed before action."
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Mock responses (offline / local dev)
+# ---------------------------------------------------------------------------
+
+MOCK_RESPONSES: dict[str, str] = {
+    "default": (
+        "**[MOCK MODE — DeepSeismic Analyst]**\n\n"
+        "**Observed Evidence (Ash / Geophysics perspective):**\n"
+        "- Dataset `volve-survey-a` is loaded; Zarr derivative and SEG-Y source intact.\n"
+        "- Preprocessing run `run-volve-preproc-01` completed without errors.\n"
+        "- Inference run `run-volve-unet-01` completed; 12 QC slices generated.\n"
+        "- Amplitude anomaly detected: IL 1050–1120, XL 980–1040, ~3 510 m TVDSS.\n\n"
+        "**Interpretation (Kane / Geology cross-check):**\n"
+        "- Anomaly depth correlates with the Hugin Formation top in offset wells "
+        "15/9-F-1 B and 15/9-F-4 (~3 512 m TVDSS).\n"
+        "- Facies probability suggests a candidate sandstone body; structural dip is "
+        "consistent with a westward-dipping drape over the basement high.\n\n"
+        "**Caveats:**\n"
+        "- This is a mock response — no live data was queried.\n"
+        "- The UNet baseline requires analyst sign-off before subsurface interpretation.\n"
+        "- Fluid contact inference is speculative without well log integration.\n\n"
+        "**Recommended Next Step:**\n"
+        "Run `/status` to confirm live run state, then ask me to generate an "
+        "analyst handoff note once you have reviewed the QC slices."
+    ),
+    "status": (
+        "**[MOCK MODE — Run Status]**\n\n"
+        "| Component | ID | Status | Updated |\n"
+        "|---|---|---|---|\n"
+        "| Dataset | `volve-survey-a` | ✅ loaded | 2026-06-09 |\n"
+        "| Preprocessing | `run-volve-preproc-01` | ✅ completed | 2026-06-09 |\n"
+        "| Inference | `run-volve-unet-01` | ✅ completed | 2026-06-09 |\n"
+        "| QC Artifacts | `res-volve-unet-01` | ✅ 12 slices | 2026-06-09 |\n\n"
+        "Everything is nominal. The result is ready for analyst review."
+    ),
+    "wells": (
+        "**[MOCK MODE — Well Data]**\n\n"
+        "Volve field wells in scope:\n\n"
+        "| Well | Type | TD (m TVDSS) | Hugin Fm Top |\n"
+        "|---|---|---|---|\n"
+        "| 15/9-F-1 B | Producer | 3 850 | 3 512 m TVDSS |\n"
+        "| 15/9-F-4 | Producer | 3 831 | 3 498 m TVDSS |\n"
+        "| 15/9-F-11 | Injector | 3 740 | 3 471 m TVDSS |\n"
+        "| 15/9-F-15 D | Producer | 3 892 | 3 535 m TVDSS |\n\n"
+        "Well 15/9-F-1 B provides the primary formation-top control for "
+        "the current interpretation window."
+    ),
+    "interpret": (
+        "**[MOCK MODE — End-to-End Workflow Analysis]**\n\n"
+        "**Step 1 — Data inventory:** `volve-survey-a` loaded; Zarr + SEG-Y present.\n"
+        "**Step 2 — QC review:** preprocessing and inference both completed; "
+        "12 QC slices available.\n"
+        "**Step 3 — Result summary:** UNet detected a candidate fault corridor "
+        "(IL 1050–1120) and amplitude anomaly at Hugin Fm level (~3 510 ms TWT).\n\n"
+        "**Step 4 — Analyst handoff note:**\n\n"
+        "> *Volve Subset Analysis — 2026-06-09*\n"
+        "> Inference complete. Candidate fault and amplitude anomaly identified in "
+        "> the southeastern quadrant. Hugin Fm correlation ties well 15/9-F-1 B at "
+        "> 3 512 m TVDSS. Recommend geologist review of QC slices before sign-off. "
+        "> No production decisions should be made on seismic output alone.\n\n"
+        "**Caveats:** Mock data only. Expert review required before any action.\n\n"
+        "**Recommended Next Step:** Load live data and re-run with `/interpret`."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SessionState:
+    """Working memory for a single agent conversation thread."""
+
+    thread_id: Optional[str] = None
+    dataset_id: Optional[str] = None
+    run_id: Optional[str] = None
+    result_id: Optional[str] = None
+    persona: Optional[str] = None  # geophysics | geology | geoengineering
+    step_history: list[str] = field(default_factory=list)
+    tool_call_log: list[dict[str, Any]] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Tool registry helpers
+# ---------------------------------------------------------------------------
+
+def _load_tool_definitions() -> list[dict[str, Any]]:
+    """Collect JSON schema tool definitions from all tool modules."""
+    from deepseismic.agent.tools.seismic_tools import SEISMIC_TOOL_DEFINITIONS
+    from deepseismic.agent.tools.geological_tools import GEOLOGICAL_TOOL_DEFINITIONS
+    from deepseismic.agent.tools.reporting_tools import REPORTING_TOOL_DEFINITIONS
+
+    return SEISMIC_TOOL_DEFINITIONS + GEOLOGICAL_TOOL_DEFINITIONS + REPORTING_TOOL_DEFINITIONS
+
+
+def _dispatch_tool_call(tool_name: str, arguments: dict[str, Any]) -> Any:
+    """Route a tool call to its handler and return the result dict."""
+    from deepseismic.agent.tools.seismic_tools import SEISMIC_TOOL_HANDLERS
+    from deepseismic.agent.tools.geological_tools import GEOLOGICAL_TOOL_HANDLERS
+    from deepseismic.agent.tools.reporting_tools import REPORTING_TOOL_HANDLERS
+
+    all_handlers: dict[str, Any] = {
+        **SEISMIC_TOOL_HANDLERS,
+        **GEOLOGICAL_TOOL_HANDLERS,
+        **REPORTING_TOOL_HANDLERS,
+    }
+    handler = all_handlers.get(tool_name)
+    if handler is None:
+        return {"error": f"Unknown tool: {tool_name}"}
+    try:
+        return handler(**arguments)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Tool call failed: %s(%s)", tool_name, arguments)
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Mock agent (local dev, no Azure)
+# ---------------------------------------------------------------------------
+
+class MockAgent:
+    """Returns canned responses for local development without Azure credentials."""
+
+    def chat(
+        self,
+        message: str,
+        state: Optional[SessionState] = None,  # noqa: ARG002
+    ) -> Generator[str, None, None]:
+        """Yield a mock response based on keyword matching, word by word."""
+        lower = message.lower()
+        if any(k in lower for k in ("status", "run", "preproc", "inference", "job")):
+            key = "status"
+        elif any(k in lower for k in ("well", "formation", "tops", "borehole", "15/9")):
+            key = "wells"
+        elif any(k in lower for k in ("analyze", "end-to-end", "workflow", "full analysis")):
+            key = "interpret"
+        else:
+            key = "default"
+
+        response = MOCK_RESPONSES[key]
+        # Emit word-by-word to simulate streaming
+        for word in response.split(" "):
+            yield word + " "
+
+
+# ---------------------------------------------------------------------------
+# Live Foundry agent
+# ---------------------------------------------------------------------------
+
+class FoundryAgent:
+    """Azure AI Foundry Agent Service client.
+
+    Creates or reuses a named Foundry agent and manages conversation threads via
+    the ``azure-ai-projects`` SDK. Tool calls are dispatched locally to the FastAPI
+    backend through the tool handler registry.
+    """
+
+    AGENT_NAME = "deepseismic-analyst"
+
+    def __init__(self, persona: Optional[str] = None) -> None:
+        from azure.ai.projects import AIProjectClient
+        from azure.identity import DefaultAzureCredential
+
+        endpoint = os.environ["AZURE_PROJECT_ENDPOINT"]
+        self._client = AIProjectClient(
+            endpoint=endpoint,
+            credential=DefaultAzureCredential(),
+        )
+        self._persona = persona
+        self._agent = self._ensure_agent()
+
+    def _build_instructions(self) -> str:
+        instructions = SYSTEM_PROMPT
+        if self._persona and self._persona in PERSONA_SUPPLEMENTS:
+            instructions += PERSONA_SUPPLEMENTS[self._persona]
+        return instructions
+
+    def _ensure_agent(self) -> Any:
+        """Return an existing agent by name or create a new one."""
+        from azure.ai.projects.models import FunctionTool, ToolSet
+
+        agents_client = self._client.agents
+        tool_defs = _load_tool_definitions()
+
+        tools = [
+            FunctionTool(
+                name=td["name"],
+                description=td["description"],
+                parameters=td["parameters"],
+            )
+            for td in tool_defs
+        ]
+        toolset = ToolSet()
+        toolset.add(tools)
+
+        for existing in agents_client.list_agents():
+            if existing.name == self.AGENT_NAME:
+                logger.info("Reusing existing Foundry agent: %s", existing.id)
+                return existing
+
+        agent = agents_client.create_agent(
+            model=os.environ.get("AZURE_OPENAI_MODEL", "gpt-4o"),
+            name=self.AGENT_NAME,
+            instructions=self._build_instructions(),
+            toolset=toolset,
+        )
+        logger.info("Created Foundry agent: %s", agent.id)
+        return agent
+
+    def create_thread(self) -> str:
+        """Create a new conversation thread and return its ID."""
+        thread = self._client.agents.create_thread()
+        return thread.id
+
+    def chat(
+        self,
+        message: str,
+        thread_id: Optional[str] = None,
+        state: Optional[SessionState] = None,
+    ) -> Generator[str, None, None]:
+        """Send a user message and yield assistant response chunks.
+
+        Automatically executes tool calls inline, yielding abbreviated call
+        markers so the UI can display progress without exposing raw JSON.
+        """
+        from azure.ai.projects.models import (
+            MessageRole,
+            RequiredActionType,
+            RunStatus,
+        )
+
+        if thread_id is None:
+            thread_id = self.create_thread()
+
+        self._client.agents.create_message(
+            thread_id=thread_id,
+            role=MessageRole.USER,
+            content=message,
+        )
+
+        run = self._client.agents.create_run(
+            thread_id=thread_id,
+            agent_id=self._agent.id,
+        )
+
+        while run.status in (RunStatus.QUEUED, RunStatus.IN_PROGRESS, RunStatus.REQUIRES_ACTION):
+            time.sleep(0.5)
+            run = self._client.agents.get_run(thread_id=thread_id, run_id=run.id)
+
+            if run.status == RunStatus.REQUIRES_ACTION:
+                action_type = run.required_action.type
+                if action_type == RequiredActionType.SUBMIT_TOOL_OUTPUTS:
+                    tool_outputs = []
+                    for call in run.required_action.submit_tool_outputs.tool_calls:
+                        tool_name = call.function.name
+                        args = json.loads(call.function.arguments or "{}")
+                        args_display = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                        yield f"\n> 🔧 `{tool_name}({args_display})`\n"
+                        result = _dispatch_tool_call(tool_name, args)
+                        if state is not None:
+                            state.tool_call_log.append(
+                                {"tool": tool_name, "args": args, "result": result}
+                            )
+                        tool_outputs.append(
+                            {"tool_call_id": call.id, "output": json.dumps(result)}
+                        )
+                    run = self._client.agents.submit_tool_outputs_to_run(
+                        thread_id=thread_id,
+                        run_id=run.id,
+                        tool_outputs=tool_outputs,
+                    )
+
+        if run.status != RunStatus.COMPLETED:
+            yield f"\n⚠️ Run ended with status: {run.status}\n"
+            return
+
+        messages = self._client.agents.list_messages(thread_id=thread_id)
+        for msg in messages:
+            if msg.role == MessageRole.ASSISTANT:
+                for block in msg.content:
+                    if hasattr(block, "text"):
+                        yield block.text.value
+                break  # Yield only the latest assistant message
+
+
+# ---------------------------------------------------------------------------
+# Public façade
+# ---------------------------------------------------------------------------
+
+class DeepSeismicAgent:
+    """Public entry point for the DeepSeismic Analyst.
+
+    Automatically selects mock or live mode based on the ``MOCK_LLM`` environment
+    variable. Both modes expose the same ``chat()`` streaming interface.
+
+    Attributes
+    ----------
+    persona:
+        Active domain perspective: ``"geophysics"``, ``"geology"``, or
+        ``"geoengineering"``. ``None`` means the agent selects based on context.
+    state:
+        Current session working memory (thread ID, dataset, run, result IDs).
+
+    Example
+    -------
+    ::
+
+        from deepseismic.agent.agent import DeepSeismicAgent
+
+        agent = DeepSeismicAgent()
+        for chunk in agent.chat("Is the Volve preprocessing run complete?"):
+            print(chunk, end="", flush=True)
+    """
+
+    def __init__(self, persona: Optional[str] = None) -> None:
+        self.persona = persona
+        self.state = SessionState(persona=persona)
+
+        if MOCK_MODE:
+            logger.info("DeepSeismicAgent: starting in MOCK mode (MOCK_LLM=true)")
+            self._impl: MockAgent | FoundryAgent = MockAgent()
+        else:
+            logger.info("DeepSeismicAgent: connecting to Azure AI Foundry")
+            self._impl = FoundryAgent(persona=persona)
+            self.state.thread_id = self._impl.create_thread()
+
+    @property
+    def is_mock(self) -> bool:
+        """True when the agent is running in local mock mode."""
+        return MOCK_MODE
+
+    def chat(self, message: str) -> Generator[str, None, None]:
+        """Send a message and yield response text as streaming chunks.
+
+        Tool calls are surfaced as abbreviated inline markers (``> 🔧 tool_name(...)``).
+        Callers can accumulate chunks for a full response or render them token-by-token.
+
+        Args:
+            message: Natural language message from the analyst.
+
+        Yields:
+            Text chunks of the assistant response.
+        """
+        if isinstance(self._impl, MockAgent):
+            yield from self._impl.chat(message, self.state)
+        else:
+            yield from self._impl.chat(message, self.state.thread_id, self.state)
+
+    def set_persona(self, persona: str) -> None:
+        """Switch the active domain perspective.
+
+        Args:
+            persona: One of ``"geophysics"``, ``"geology"``, ``"geoengineering"``.
+
+        Raises:
+            ValueError: If the persona name is not recognised.
+        """
+        valid = {"geophysics", "geology", "geoengineering"}
+        if persona not in valid:
+            raise ValueError(f"persona must be one of {valid}; got {persona!r}")
+        self.persona = persona
+        self.state.persona = persona
+
+    def get_state_summary(self) -> dict[str, Any]:
+        """Return a compact snapshot of current session state suitable for UI display."""
+        return {
+            "thread_id": self.state.thread_id,
+            "dataset_id": self.state.dataset_id,
+            "run_id": self.state.run_id,
+            "result_id": self.state.result_id,
+            "persona": self.state.persona,
+            "steps_completed": len(self.state.step_history),
+            "tool_calls": len(self.state.tool_call_log),
+            "mock_mode": MOCK_MODE,
+        }

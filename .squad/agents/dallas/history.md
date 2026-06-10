@@ -50,3 +50,9 @@
 - `VolumeInference.from_checkpoint()` — preferred entry point for inference scripts; avoids caller needing to instantiate UNet manually.
 - `segy_to_zarr()` / `run_inference()` — convenience one-call functions for pipeline scripts and notebooks.
 
+
+## Scribe Cross-Agent Update — 2026-06-10T04:30-05:00
+Sprint 1 coordination complete. All agents delivered successfully.
+- 5 agents synchronized
+- 7 decision documents archived
+- Full team context available in decisions.md

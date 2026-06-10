@@ -39,6 +39,7 @@ data/*
 *.sgy
 *.parquet
 *.h5
+data/volve/
 
 # OS / editor
 .DS_Store

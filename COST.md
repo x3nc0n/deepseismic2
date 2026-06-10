@@ -13,15 +13,16 @@ Tracks the AI/LLM costs incurred during development — model calls, agent spawn
 | 2026-06-09 | Data assessment | Ash (sonnet), Kane (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$0.70 | Volve geophysics + geology assessments |
 | 2026-06-09 | Scaffold & design | Ripley (sonnet), Lambert (sonnet), Parker (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$1.20 | Repo scaffold, Foundry design, infra repo, email draft |
 | 2026-06-09 | Sprint 1 build | Dallas (sonnet), Parker (sonnet), Lambert (sonnet), Hudson (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$4.50 | Full ingest pipeline, UNet, agent+3 UIs, storage client, 79 tests, CI |
+| 2026-06-10 | Data acquisition | Dallas (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$0.90 | Volve data guide, download scripts, Databricks export, real notebook |
 
 ### Cumulative Totals
 
 | Metric | Value |
 |--------|-------|
-| **Total sessions** | 5 |
-| **Total agent spawns** | 15 (Dallas, Parker×3, Lambert×2, Ripley×2, Hudson, Ash, Kane, Scribe×3) |
-| **Estimated total AI cost** | ~$7.65 |
-| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 79 tests, CI, infra repo |
+| **Total sessions** | 6 |
+| **Total agent spawns** | 17 (Dallas×2, Parker×3, Lambert×2, Ripley×2, Hudson, Ash, Kane, Scribe×4) |
+| **Estimated total AI cost** | ~$8.55 |
+| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 79 tests, CI, infra repo, data acquisition guide, download scripts |
 
 ### Cost Notes
 
@@ -102,3 +103,4 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 |------|-------------|
 | 2026-06-09 | Initial estimates based on architecture proposal |
 | 2026-06-09 | Added Sprint 1 build costs; updated totals; added AI Search to runtime |
+| 2026-06-10 | Added data acquisition session; updated cumulative totals |

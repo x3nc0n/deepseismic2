@@ -10,15 +10,18 @@ Tracks the AI/LLM costs incurred during development — model calls, agent spawn
 |------|---------|---------------|-------------|-----------------|----------|
 | 2026-06-09 | Architecture kickoff | Ripley (sonnet), Lambert (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$0.85 | Architecture proposal, M365 Copilot agent design, team setup |
 | 2026-06-09 | SME onboarding | — (coordinator inline) | claude-opus-4.6 | ~$0.40 | Created 3 domain SME charters (Ash, Kane, Brett) |
+| 2026-06-09 | Data assessment | Ash (sonnet), Kane (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$0.70 | Volve geophysics + geology assessments |
+| 2026-06-09 | Scaffold & design | Ripley (sonnet), Lambert (sonnet), Parker (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$1.20 | Repo scaffold, Foundry design, infra repo, email draft |
+| 2026-06-09 | Sprint 1 build | Dallas (sonnet), Parker (sonnet), Lambert (sonnet), Hudson (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$4.50 | Full ingest pipeline, UNet, agent+3 UIs, storage client, 79 tests, CI |
 
 ### Cumulative Totals
 
 | Metric | Value |
 |--------|-------|
-| **Total sessions** | 1 |
-| **Total agent spawns** | 3 (Ripley, Lambert, Scribe) |
-| **Estimated total AI cost** | ~$1.25 |
-| **Artifacts produced** | 2 design docs, 8 agent charters, team infrastructure |
+| **Total sessions** | 5 |
+| **Total agent spawns** | 15 (Dallas, Parker×3, Lambert×2, Ripley×2, Hudson, Ash, Kane, Scribe×3) |
+| **Estimated total AI cost** | ~$7.65 |
+| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 79 tests, CI, infra repo |
 
 ### Cost Notes
 
@@ -75,9 +78,10 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 | Storage | $3.00 |
 | Compute | $30.00 |
 | AI/LLM | $47.00 + licensing |
+| AI Search (Basic) | $70.00 |
 | Supporting | $7.50 |
-| **Total (excl. M365 licensing)** | **~$87.50/month** |
-| **Total (incl. 1 M365 Copilot user)** | **~$117.50/month** |
+| **Total (excl. M365 licensing)** | **~$157.50/month** |
+| **Total (incl. 1 M365 Copilot user)** | **~$187.50/month** |
 
 ### Cost Comparison vs. Legacy
 
@@ -97,3 +101,4 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 | Date | What Changed |
 |------|-------------|
 | 2026-06-09 | Initial estimates based on architecture proposal |
+| 2026-06-09 | Added Sprint 1 build costs; updated totals; added AI Search to runtime |

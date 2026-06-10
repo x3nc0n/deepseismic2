@@ -236,18 +236,11 @@ _THEME = gr.themes.Base(
     neutral_hue=gr.themes.colors.slate,
     font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
     font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "monospace"],
-).set(
-    body_background_fill="#0f172a",
-    block_background_fill="#1e293b",
-    block_border_color="#334155",
-    input_background_fill="#0f172a",
-    chatbot_code_background_color="#0d1520",
 )
 
 with gr.Blocks(
-    theme=_THEME,
     title="DeepSeismic Analyst",
-    css=".gradio-container { max-width: 1400px !important; }",
+    theme=_THEME,
 ) as demo:
 
     gr.Markdown(f"## {TITLE}")
@@ -258,15 +251,11 @@ with gr.Blocks(
         with gr.Column(scale=1, min_width=420):
             chatbot = gr.Chatbot(
                 label="Agent Conversation",
-                height=520,
-                bubble_full_width=False,
-                show_copy_button=True,
-                avatar_images=(None, "https://em-content.zobj.net/source/twitter/376/robot_1f916.png"),
             )
 
             with gr.Row():
                 msg_box = gr.Textbox(
-                    placeholder="Ask about the Volve survey, runs, wells, or results…",
+                    placeholder="Ask about the Volve survey, runs, wells, or results...",
                     label="Your message",
                     lines=2,
                     scale=4,
@@ -275,9 +264,9 @@ with gr.Blocks(
                 send_btn = gr.Button("Send", scale=1, variant="primary")
 
             with gr.Row():
-                btn_status = gr.Button("📊 Status", size="sm")
-                btn_wells = gr.Button("🛢 Wells", size="sm")
-                btn_analyze = gr.Button("🔍 Full Analysis", size="sm")
+                btn_status = gr.Button("Status", size="sm")
+                btn_wells = gr.Button("Wells", size="sm")
+                btn_analyze = gr.Button("Full Analysis", size="sm")
 
             persona_dd = gr.Dropdown(
                 choices=["Auto", "Geophysics (Ash)", "Geology (Kane)", "Geoengineering (Brett)"],
@@ -286,14 +275,13 @@ with gr.Blocks(
                 interactive=True,
             )
 
-            clear_btn = gr.Button("🗑 Clear Chat", size="sm", variant="secondary")
+            clear_btn = gr.Button("Clear Chat", size="sm", variant="secondary")
 
         # ── Right column: seismic viewer ───────────────────────────────────
         with gr.Column(scale=1, min_width=420):
             seismic_image = gr.Image(
                 label="Seismic Inline Viewer",
                 type="numpy",
-                show_download_button=True,
                 height=400,
             )
 

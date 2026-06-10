@@ -1,0 +1,17 @@
+{
+  "universe_usage_history": [
+    {
+      "universe": "Alien",
+      "assigned_at": "2026-06-10T02:56:47Z",
+      "project": "deepseismic2"
+    }
+  ],
+  "assignment_cast_snapshots": {
+    "deepseismic2-initial": {
+      "assignment_id": "deepseismic2-initial",
+      "universe": "Alien",
+      "timestamp": "2026-06-10T02:56:47Z",
+      "agents": ["Ripley", "Dallas", "Parker", "Lambert", "Hudson"]
+    }
+  }
+}

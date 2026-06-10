@@ -1,0 +1,99 @@
+# DeepSeismic2 — Cost Tracking
+
+## AI Production Costs (Building the Product)
+
+Tracks the AI/LLM costs incurred during development — model calls, agent spawns, token usage.
+
+### Session Log
+
+| Date | Session | Agents Spawned | Models Used | Est. Token Cost | Outcomes |
+|------|---------|---------------|-------------|-----------------|----------|
+| 2026-06-09 | Architecture kickoff | Ripley (sonnet), Lambert (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$0.85 | Architecture proposal, M365 Copilot agent design, team setup |
+| 2026-06-09 | SME onboarding | — (coordinator inline) | claude-opus-4.6 | ~$0.40 | Created 3 domain SME charters (Ash, Kane, Brett) |
+
+### Cumulative Totals
+
+| Metric | Value |
+|--------|-------|
+| **Total sessions** | 1 |
+| **Total agent spawns** | 3 (Ripley, Lambert, Scribe) |
+| **Estimated total AI cost** | ~$1.25 |
+| **Artifacts produced** | 2 design docs, 8 agent charters, team infrastructure |
+
+### Cost Notes
+
+- Opus used for coordinator (high-reasoning orchestration)
+- Sonnet used for code-producing agents (quality tier)
+- Haiku used for Scribe (mechanical file ops)
+- Estimates based on approximate token counts × published API pricing
+
+---
+
+## Azure Runtime Cost Estimates (Running the Solution)
+
+Estimated monthly costs for the PoC environment based on Ripley's architecture proposal.
+
+### Storage Tier
+
+| Service | Configuration | Est. Monthly Cost | Notes |
+|---------|--------------|-------------------|-------|
+| ADLS Gen2 / Blob (Hot) | ~50 GB (Volve subset) | ~$1.00 | Raw SEG-Y + derived Zarr |
+| ADLS Gen2 / Blob (Cool) | ~200 GB (full Volve archive) | ~$2.00 | Infrequent access archive |
+| **Storage subtotal** | | **~$3.00** | vs. ~$200+/mo for Premium Files or ~$500+/mo for NetApp Files equivalent |
+
+### Compute Tier
+
+| Service | Configuration | Est. Monthly Cost | Notes |
+|---------|--------------|-------------------|-------|
+| Azure Container Apps Jobs (CPU) | Consumption plan, ~10 runs/month | ~$5.00 | Preprocessing, SEG-Y parsing |
+| Azure ML Compute (GPU) | Standard_NC6s_v3, ~5 hrs/month | ~$15.00 | UNet inference (pay-per-use) |
+| Azure Container Apps (API) | 1 vCPU, 2 GB RAM, low traffic | ~$10.00 | FastAPI backend |
+| **Compute subtotal** | | **~$30.00** | |
+
+### AI/LLM Tier
+
+| Service | Configuration | Est. Monthly Cost | Notes |
+|---------|--------------|-------------------|-------|
+| Azure OpenAI (GPT-4o) | ~100K tokens/day analyst queries | ~$15.00 | M365 Copilot agent backend |
+| Azure OpenAI (embeddings) | RAG indexing + queries | ~$2.00 | Document grounding |
+| M365 Copilot licensing | Per-user (enterprise) | $30.00/user | Required for published agent access |
+| **AI subtotal** | | **~$47.00** + licensing | |
+
+### Supporting Services
+
+| Service | Configuration | Est. Monthly Cost | Notes |
+|---------|--------------|-------------------|-------|
+| Azure Container Registry | Basic tier | ~$5.00 | Container images |
+| Application Insights | Basic telemetry | ~$2.00 | Logs and monitoring |
+| Azure Key Vault | Standard | ~$0.50 | Secrets management |
+| **Supporting subtotal** | | **~$7.50** | |
+
+### Total Estimated Monthly Cost (PoC)
+
+| Category | Monthly |
+|----------|---------|
+| Storage | $3.00 |
+| Compute | $30.00 |
+| AI/LLM | $47.00 + licensing |
+| Supporting | $7.50 |
+| **Total (excl. M365 licensing)** | **~$87.50/month** |
+| **Total (incl. 1 M365 Copilot user)** | **~$117.50/month** |
+
+### Cost Comparison vs. Legacy
+
+| Approach | Est. Monthly | Notes |
+|----------|-------------|-------|
+| **This PoC (cloud-native)** | ~$88–118 | Object storage + on-demand compute + AI |
+| **Premium Files (1 TB)** | ~$200+ | Just storage, no compute or AI |
+| **Azure NetApp Files (1 TB)** | ~$500+ | Just storage, no compute or AI |
+| **Dell Isilon (on-prem)** | $$$$ | Hardware + maintenance + power + cooling |
+
+**Key insight:** The entire PoC (storage + compute + AI) costs less than the storage tier alone in the legacy approach.
+
+---
+
+## Update History
+
+| Date | What Changed |
+|------|-------------|
+| 2026-06-09 | Initial estimates based on architecture proposal |

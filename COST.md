@@ -14,15 +14,16 @@ Tracks the AI/LLM costs incurred during development — model calls, agent spawn
 | 2026-06-09 | Scaffold & design | Ripley (sonnet), Lambert (sonnet), Parker (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$1.20 | Repo scaffold, Foundry design, infra repo, email draft |
 | 2026-06-09 | Sprint 1 build | Dallas (sonnet), Parker (sonnet), Lambert (sonnet), Hudson (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$4.50 | Full ingest pipeline, UNet, agent+3 UIs, storage client, 79 tests, CI |
 | 2026-06-10 | Data acquisition | Dallas (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$0.90 | Volve data guide, download scripts, Databricks export, real notebook |
+| 2026-06-10 | Azure deploy & live app | Opus (coordinator), general-purpose agents | claude-opus-4.6, claude-sonnet-4.6 | ~$6.50 | 8 infra fixes, architecture diagrams, ACR builds, data upload, 2 Container Apps live, OpenAI wired |
 
 ### Cumulative Totals
 
 | Metric | Value |
 |--------|-------|
-| **Total sessions** | 6 |
-| **Total agent spawns** | 17 (Dallas×2, Parker×3, Lambert×2, Ripley×2, Hudson, Ash, Kane, Scribe×4) |
-| **Estimated total AI cost** | ~$8.55 |
-| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 79 tests, CI, infra repo, data acquisition guide, download scripts |
+| **Total sessions** | 7 |
+| **Total agent spawns** | 20+ (Dallas×2, Parker×3, Lambert×2, Ripley×2, Hudson, Ash, Kane, Scribe×4, general-purpose×3) |
+| **Estimated total AI cost** | ~$15.05 |
+| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 79 tests, CI, infra repo, data acquisition guide, download scripts, 2 architecture diagrams, 2 Dockerfiles, live Azure deployment |
 
 ### Cost Notes
 
@@ -72,6 +73,14 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 | Azure Key Vault | Standard | ~$0.50 | Secrets management |
 | **Supporting subtotal** | | **~$7.50** | |
 
+### Actual Azure Spend (rg-deepseismic2-dev)
+
+| Period | Total | Top Services |
+|--------|-------|-------------|
+| 2026-06-10 (1 day MTD) | $1.87 | AI Search $1.62, Defender $0.13, ACR $0.11 |
+
+**Projected monthly (based on actual):** ~$55–60/month (AI Search Basic @ $49/mo is dominant cost)
+
 ### Total Estimated Monthly Cost (PoC)
 
 | Category | Monthly |
@@ -79,10 +88,10 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 | Storage | $3.00 |
 | Compute | $30.00 |
 | AI/LLM | $47.00 + licensing |
-| AI Search (Basic) | $70.00 |
+| AI Search (Basic) | $49.00 |
 | Supporting | $7.50 |
-| **Total (excl. M365 licensing)** | **~$157.50/month** |
-| **Total (incl. 1 M365 Copilot user)** | **~$187.50/month** |
+| **Total (excl. M365 licensing)** | **~$136.50/month** |
+| **Total (incl. 1 M365 Copilot user)** | **~$166.50/month** |
 
 ### Cost Comparison vs. Legacy
 
@@ -104,3 +113,4 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 | 2026-06-09 | Initial estimates based on architecture proposal |
 | 2026-06-09 | Added Sprint 1 build costs; updated totals; added AI Search to runtime |
 | 2026-06-10 | Added data acquisition session; updated cumulative totals |
+| 2026-06-10 | Added Azure deploy session ($6.50); actual Azure spend ($1.87 day 1); revised AI Search to $49/mo (actual Basic SKU pricing); live endpoints confirmed |

@@ -1,0 +1,44 @@
+# ===========================================================================
+# deepseismic2 Gradio UI — multi-stage Docker build
+# ===========================================================================
+
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+RUN pip install --upgrade pip --no-cache-dir
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+
+# Install with gradio extras
+RUN pip install --no-cache-dir ".[ui]" || pip install --no-cache-dir .
+RUN pip install --no-cache-dir gradio matplotlib pillow
+
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+
+RUN groupadd -r deepseismic \
+ && useradd -r -g deepseismic -d /app deepseismic
+
+COPY --from=builder /usr/local/lib/python3.11/site-packages \
+                    /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+COPY src ./src
+
+RUN chown -R deepseismic:deepseismic /app
+
+USER deepseismic
+
+EXPOSE 7860
+
+ENV GRADIO_PORT=7860
+ENV GRADIO_SERVER_NAME=0.0.0.0
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c \
+        "import urllib.request; urllib.request.urlopen('http://localhost:7860/')" \
+        || exit 1
+
+CMD ["python", "src/deepseismic/ui/gradio_app.py"]

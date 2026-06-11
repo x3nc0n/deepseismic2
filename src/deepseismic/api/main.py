@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from deepseismic.api.dependencies import _build_storage_client, is_mock_mode
-from deepseismic.api.routes import interpretation, surveys, wells
+from deepseismic.api.routes import browse, interpretation, surveys, wells
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(surveys.router, prefix="/api")
     app.include_router(interpretation.router, prefix="/api")
     app.include_router(wells.router, prefix="/api")
+    app.include_router(browse.router, prefix="/api")
 
     return app
 

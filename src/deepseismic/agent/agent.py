@@ -314,7 +314,7 @@ class FoundryAgent:
 
     def _ensure_agent(self) -> Any:
         """Return an existing agent by name or create a new one."""
-        from azure.ai.projects.models import FunctionTool, ToolSet
+        from azure.ai.projects.models import FunctionTool
 
         agents_client = self._client.agents
         tool_defs = _load_tool_definitions()
@@ -327,8 +327,6 @@ class FoundryAgent:
             )
             for td in tool_defs
         ]
-        toolset = ToolSet()
-        toolset.add(tools)
 
         for existing in agents_client.list_agents():
             if existing.name == self.AGENT_NAME:
@@ -339,7 +337,7 @@ class FoundryAgent:
             model=os.environ.get("AZURE_OPENAI_MODEL", "gpt-4o"),
             name=self.AGENT_NAME,
             instructions=self._build_instructions(),
-            toolset=toolset,
+            tools=tools,
         )
         logger.info("Created Foundry agent: %s", agent.id)
         return agent

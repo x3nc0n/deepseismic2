@@ -1,6 +1,7 @@
 """Gradio demo application for the DeepSeismic Analyst agent.
 
 Provides a minimal but demo-ready interface with:
+- **Project picker** — browse ADLS storage to select surveys/datasets
 - **Chatbot** — full conversation history with the agent
 - **Seismic image** — inline section with optional fault probability overlay
 - **Controls** — inline/crossline selector, persona dropdown, quick-action buttons
@@ -29,6 +30,7 @@ from matplotlib.colors import LinearSegmentedColormap
 matplotlib.use("Agg")  # Non-interactive backend for server rendering
 
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
+API_BASE_URL: str = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
 # ---------------------------------------------------------------------------
 # Agent singleton (one per server process)
@@ -43,6 +45,51 @@ def _get_agent() -> Any:
         from deepseismic.agent.agent import DeepSeismicAgent
         _agent = DeepSeismicAgent()
     return _agent
+
+
+# ---------------------------------------------------------------------------
+# ADLS Project Browser
+# ---------------------------------------------------------------------------
+
+def _browse_storage(container: str, prefix: str = "") -> list[dict]:
+    """Fetch folder/file listing from the API browse endpoint."""
+    import requests
+    try:
+        resp = requests.get(
+            f"{API_BASE_URL}/api/browse/{container}",
+            params={"prefix": prefix},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("items", [])
+    except Exception:
+        pass
+    return []
+
+
+def _format_browse_tree(container: str, prefix: str = "") -> str:
+    """Build a displayable tree view for the current path."""
+    items = _browse_storage(container, prefix)
+    if not items:
+        return "_No items found._"
+
+    lines = []
+    for item in items:
+        if item["type"] == "folder":
+            lines.append(f"📁 **{item['name']}/**")
+        else:
+            size_mb = (item.get("size") or 0) / 1_048_576
+            size_str = f" ({size_mb:.1f} MB)" if size_mb > 0.1 else ""
+            lines.append(f"📄 {item['name']}{size_str}")
+    return "\n".join(lines)
+
+
+def _get_project_choices(container: str, prefix: str = "") -> list[str]:
+    """Return list of folder names at the current prefix."""
+    items = _browse_storage(container, prefix)
+    folders = [item["name"] for item in items if item["type"] == "folder"]
+    return folders
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +296,33 @@ with gr.Blocks(
     gr.Markdown(f"## {TITLE}")
     gr.Markdown(DESCRIPTION)
 
+    # ── Project browser (collapsible) ──────────────────────────────────────
+    with gr.Accordion("📂 Project Browser — ADLS Storage", open=False):
+        with gr.Row():
+            container_dd = gr.Dropdown(
+                choices=["raw", "staged", "features", "results", "catalog"],
+                value="raw",
+                label="Container",
+                interactive=True,
+                scale=1,
+            )
+            path_display = gr.Textbox(
+                value="/",
+                label="Current Path",
+                interactive=False,
+                scale=3,
+            )
+        with gr.Row():
+            folder_dd = gr.Dropdown(
+                choices=[],
+                label="Navigate to folder",
+                interactive=True,
+                scale=2,
+            )
+            nav_btn = gr.Button("Open →", size="sm", scale=1)
+            up_btn = gr.Button("↑ Up", size="sm", scale=1)
+        browse_output = gr.Markdown("_Select a container to browse._")
+
     with gr.Row():
         # ── Left column: chat ──────────────────────────────────────────────
         with gr.Column(scale=1, min_width=420):
@@ -309,6 +383,55 @@ with gr.Blocks(
             )
 
     # ── Wire up events ─────────────────────────────────────────────────────
+
+    # -- Project browser events --
+    _browser_state = gr.State({"container": "raw", "prefix": ""})
+
+    def _refresh_browser(state: dict) -> tuple:
+        container = state["container"]
+        prefix = state["prefix"]
+        tree = _format_browse_tree(container, prefix)
+        folders = _get_project_choices(container, prefix)
+        path_str = f"/{prefix}" if prefix else "/"
+        return tree, gr.update(choices=folders, value=None), path_str
+
+    def _on_container_change(container: str, state: dict) -> tuple:
+        state["container"] = container
+        state["prefix"] = ""
+        tree, folders, path_str = _refresh_browser(state)
+        return tree, folders, path_str, state
+
+    def _on_navigate(folder: str | None, state: dict) -> tuple:
+        if folder:
+            state["prefix"] = state["prefix"] + folder + "/"
+        tree, folders, path_str = _refresh_browser(state)
+        return tree, folders, path_str, state
+
+    def _on_up(state: dict) -> tuple:
+        prefix = state["prefix"]
+        if prefix:
+            parts = prefix.rstrip("/").split("/")
+            state["prefix"] = "/".join(parts[:-1]) + "/" if len(parts) > 1 else ""
+        tree, folders, path_str = _refresh_browser(state)
+        return tree, folders, path_str, state
+
+    container_dd.change(
+        _on_container_change,
+        inputs=[container_dd, _browser_state],
+        outputs=[browse_output, folder_dd, path_display, _browser_state],
+    )
+    nav_btn.click(
+        _on_navigate,
+        inputs=[folder_dd, _browser_state],
+        outputs=[browse_output, folder_dd, path_display, _browser_state],
+    )
+    up_btn.click(
+        _on_up,
+        inputs=[_browser_state],
+        outputs=[browse_output, folder_dd, path_display, _browser_state],
+    )
+
+    # -- Chat events --
     def _send(message: str, history: list, persona: str) -> tuple:
         new_history, cleared = _chat(message, history, persona)
         return new_history, cleared

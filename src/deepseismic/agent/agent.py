@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
+from uuid import uuid4
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
@@ -285,14 +285,7 @@ class MockAgent:
 # ---------------------------------------------------------------------------
 
 class FoundryAgent:
-    """Azure AI Foundry Agent Service client.
-
-    Creates or reuses a named Foundry agent and manages conversation threads via
-    the ``azure-ai-projects`` SDK. Tool calls are dispatched locally to the FastAPI
-    backend through the tool handler registry.
-    """
-
-    AGENT_NAME = "deepseismic-analyst"
+    """Azure AI Foundry chat client backed by OpenAI-style function calling."""
 
     def __init__(self, persona: str | None = None) -> None:
         from azure.ai.projects import AIProjectClient
@@ -304,7 +297,10 @@ class FoundryAgent:
             credential=DefaultAzureCredential(),
         )
         self._persona = persona
-        self._agent = self._ensure_agent()
+        self._model = os.environ.get("AZURE_OPENAI_MODEL", "gpt-4o")
+        self._openai_client = self._client.get_openai_client()
+        self._tools = self._build_tools()
+        self._threads: dict[str, list[dict[str, Any]]] = {}
 
     def _build_instructions(self) -> str:
         instructions = SYSTEM_PROMPT
@@ -312,40 +308,47 @@ class FoundryAgent:
             instructions += PERSONA_SUPPLEMENTS[self._persona]
         return instructions
 
-    def _ensure_agent(self) -> Any:
-        """Return an existing agent by name or create a new one."""
-        from azure.ai.projects.models import FunctionTool
-
-        agents_client = self._client.agents
-        tool_defs = _load_tool_definitions()
-
-        tools = [
-            FunctionTool(
-                name=td["name"],
-                description=td["description"],
-                parameters=td["parameters"],
-            )
-            for td in tool_defs
+    def _build_tools(self) -> list[dict[str, Any]]:
+        """Return tool definitions in OpenAI chat-completions format."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_def["name"],
+                    "description": tool_def["description"],
+                    "parameters": tool_def["parameters"],
+                },
+            }
+            for tool_def in _load_tool_definitions()
         ]
 
-        for existing in agents_client.list_agents():
-            if existing.name == self.AGENT_NAME:
-                logger.info("Reusing existing Foundry agent: %s", existing.id)
-                return existing
+    def _create_history(self) -> list[dict[str, Any]]:
+        return [{"role": "system", "content": self._build_instructions()}]
 
-        agent = agents_client.create_agent(
-            model=os.environ.get("AZURE_OPENAI_MODEL", "gpt-4o"),
-            name=self.AGENT_NAME,
-            instructions=self._build_instructions(),
-            tools=tools,
-        )
-        logger.info("Created Foundry agent: %s", agent.id)
-        return agent
+    def _get_history(self, thread_id: str) -> list[dict[str, Any]]:
+        return self._threads.setdefault(thread_id, self._create_history())
+
+    @staticmethod
+    def _serialize_tool_call(tool_call: Any) -> dict[str, Any]:
+        return {
+            "id": tool_call.id,
+            "type": tool_call.type,
+            "function": {
+                "name": tool_call.function.name,
+                "arguments": tool_call.function.arguments or "{}",
+            },
+        }
+
+    @staticmethod
+    def _yield_text_chunks(text: str) -> Generator[str, None, None]:
+        for line in text.splitlines(keepends=True):
+            yield line
 
     def create_thread(self) -> str:
-        """Create a new conversation thread and return its ID."""
-        thread = self._client.agents.create_thread()
-        return thread.id
+        """Create a new in-memory conversation thread and return its ID."""
+        thread_id = uuid4().hex
+        self._threads[thread_id] = self._create_history()
+        return thread_id
 
     def chat(
         self,
@@ -353,69 +356,76 @@ class FoundryAgent:
         thread_id: str | None = None,
         state: SessionState | None = None,
     ) -> Generator[str, None, None]:
-        """Send a user message and yield assistant response chunks.
-
-        Automatically executes tool calls inline, yielding abbreviated call
-        markers so the UI can display progress without exposing raw JSON.
-        """
-        from azure.ai.projects.models import (
-            MessageRole,
-            RequiredActionType,
-            RunStatus,
-        )
-
+        """Send a user message, execute tool calls locally, and stream text chunks."""
         if thread_id is None:
-            thread_id = self.create_thread()
+            thread_id = state.thread_id if state and state.thread_id else self.create_thread()
 
-        self._client.agents.create_message(
-            thread_id=thread_id,
-            role=MessageRole.USER,
-            content=message,
-        )
+        if state is not None and state.thread_id is None:
+            state.thread_id = thread_id
 
-        run = self._client.agents.create_run(
-            thread_id=thread_id,
-            agent_id=self._agent.id,
-        )
+        history = self._get_history(thread_id)
+        history.append({"role": "user", "content": message})
 
-        while run.status in (RunStatus.QUEUED, RunStatus.IN_PROGRESS, RunStatus.REQUIRES_ACTION):
-            time.sleep(0.5)
-            run = self._client.agents.get_run(thread_id=thread_id, run_id=run.id)
+        for _ in range(16):
+            response = self._openai_client.chat.completions.create(
+                model=self._model,
+                messages=history,
+                tools=self._tools,
+            )
+            choice = response.choices[0]
+            assistant_message = choice.message
+            assistant_content = assistant_message.content or ""
+            tool_calls = assistant_message.tool_calls or []
 
-            if run.status == RunStatus.REQUIRES_ACTION:
-                action_type = run.required_action.type
-                if action_type == RequiredActionType.SUBMIT_TOOL_OUTPUTS:
-                    tool_outputs = []
-                    for call in run.required_action.submit_tool_outputs.tool_calls:
-                        tool_name = call.function.name
-                        args = json.loads(call.function.arguments or "{}")
-                        args_display = ", ".join(f"{k}={v!r}" for k, v in args.items())
-                        yield f"\n> 🔧 `{tool_name}({args_display})`\n"
-                        result = _dispatch_tool_call(tool_name, args)
-                        if state is not None:
-                            state.tool_call_log.append(
-                                {"tool": tool_name, "args": args, "result": result}
-                            )
-                        tool_outputs.append(
-                            {"tool_call_id": call.id, "output": json.dumps(result)}
-                        )
-                    run = self._client.agents.submit_tool_outputs_to_run(
-                        thread_id=thread_id,
-                        run_id=run.id,
-                        tool_outputs=tool_outputs,
+            serialized_tool_calls = [
+                self._serialize_tool_call(tool_call)
+                for tool_call in tool_calls
+            ]
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_content,
+                    **({"tool_calls": serialized_tool_calls} if serialized_tool_calls else {}),
+                }
+            )
+
+            if assistant_content:
+                yield from self._yield_text_chunks(assistant_content)
+
+            if not tool_calls:
+                return
+
+            for tool_call in tool_calls:
+                tool_name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments or "{}")
+                    if not isinstance(args, dict):
+                        raise TypeError("Tool arguments must decode to a JSON object")
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Invalid tool arguments for %s", tool_name)
+                    yield f"\n> 🔧 `{tool_name}(<invalid arguments>)`\n"
+                    args = {}
+                    result = {"error": f"Invalid tool arguments: {exc}"}
+                else:
+                    args_display = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                    yield f"\n> 🔧 `{tool_name}({args_display})`\n"
+                    result = _dispatch_tool_call(tool_name, args)
+
+                if state is not None:
+                    state.tool_call_log.append(
+                        {"tool": tool_name, "args": args, "result": result}
                     )
 
-        if run.status != RunStatus.COMPLETED:
-            yield f"\n⚠️ Run ended with status: {run.status}\n"
-            return
+                history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result),
+                    }
+                )
 
-        messages = self._client.agents.list_messages(thread_id=thread_id)
-        for msg in messages:
-            if msg.role == MessageRole.ASSISTANT:
-                for block in msg.content:
-                    if hasattr(block, "text"):
-                        yield block.text.value
-                break  # Yield only the latest assistant message
+        logger.error("Model exceeded tool-call limit for thread %s", thread_id)
+        yield "\n⚠️ Assistant stopped after too many tool calls.\n"
 
 
 # ---------------------------------------------------------------------------

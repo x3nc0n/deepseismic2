@@ -110,12 +110,12 @@ class StorageClient:
         if conn_str:
             return BlobServiceClient.from_connection_string(conn_str)
 
-        account = os.getenv("AZURE_STORAGE_ACCOUNT")
+        account = os.getenv("AZURE_STORAGE_ACCOUNT") or os.getenv("STORAGE_ACCOUNT_NAME")
         if not account:
             raise OSError(
                 "No storage credentials found. "
                 "Set STORAGE_CONNECTION_STRING (local/Azurite) or "
-                "AZURE_STORAGE_ACCOUNT (cloud with DefaultAzureCredential)."
+                "AZURE_STORAGE_ACCOUNT / STORAGE_ACCOUNT_NAME (cloud with DefaultAzureCredential)."
             )
         return BlobServiceClient(
             account_url=f"https://{account}.blob.core.windows.net",

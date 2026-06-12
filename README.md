@@ -1,6 +1,9 @@
 # DeepSeismic2
 
 [![CI](https://github.com/x3nc0n/deepseismic2/actions/workflows/ci.yml/badge.svg)](https://github.com/x3nc0n/deepseismic2/actions/workflows/ci.yml)
+[![CD](https://github.com/x3nc0n/deepseismic2/actions/workflows/cd.yml/badge.svg)](https://github.com/x3nc0n/deepseismic2/actions/workflows/cd.yml)
+[![API Image](https://img.shields.io/badge/GHCR-deepseismic2--api-blue?logo=github)](https://ghcr.io/x3nc0n/deepseismic2-api)
+[![UI Image](https://img.shields.io/badge/GHCR-deepseismic2--ui-blue?logo=github)](https://ghcr.io/x3nc0n/deepseismic2-ui)
 
 DeepSeismic2 is a proof-of-concept for modernizing seismic interpretation workflows with cloud-native data handling, ML inference, and AI-assisted analyst experiences. The goal is to prove that a lightweight Azure-first stack can replace expensive, workstation-bound legacy tooling for a constrained exploration workflow built around the Equinor Volve dataset.
 

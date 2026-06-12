@@ -288,19 +288,20 @@ class FoundryAgent:
     """Azure OpenAI chat client backed by function calling with local tool dispatch."""
 
     def __init__(self, persona: str | None = None) -> None:
-        from azure.identity import DefaultAzureCredential
+        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
         from openai import AzureOpenAI
 
         endpoint = os.environ["AZURE_PROJECT_ENDPOINT"]
         credential = DefaultAzureCredential()
-        token = credential.get_token("https://cognitiveservices.azure.com/.default")
+        token_provider = get_bearer_token_provider(
+            credential, "https://cognitiveservices.azure.com/.default"
+        )
 
         self._openai_client = AzureOpenAI(
             azure_endpoint=endpoint,
-            api_key=token.token,
+            azure_ad_token_provider=token_provider,
             api_version="2024-12-01-preview",
         )
-        self._credential = credential
         self._persona = persona
         self._model = os.environ.get("AZURE_OPENAI_MODEL", "chat")
         self._tools = self._build_tools()

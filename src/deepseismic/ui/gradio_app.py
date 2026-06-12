@@ -328,7 +328,7 @@ with gr.Blocks(
     gr.Markdown(DESCRIPTION)
 
     # ── Project browser (collapsible) ──────────────────────────────────────
-    with gr.Accordion("📂 Project Browser — ADLS Storage", open=False):
+    with gr.Accordion("📂 Project Browser — ADLS Storage", open=True):
         with gr.Row():
             container_dd = gr.Dropdown(
                 choices=["raw", "staged", "features", "results", "catalog"],
@@ -337,18 +337,24 @@ with gr.Blocks(
                 interactive=True,
                 scale=1,
             )
-            breadcrumb = gr.Markdown("📍 **/ (root)**", elem_id="breadcrumb")
+            filter_box = gr.Textbox(
+                placeholder="Filter by name...",
+                label="Filter",
+                interactive=True,
+                scale=2,
+            )
+        breadcrumb = gr.Markdown("📍 **raw:** /")
         browse_listing = gr.Dataframe(
-            headers=["", "Name", "Size"],
-            datatype=["str", "str", "str"],
-            col_count=(3, "fixed"),
+            headers=["Type", "Name", "Size", "Path"],
+            datatype=["str", "str", "str", "str"],
+            col_count=(4, "fixed"),
             interactive=False,
-            label="Click a folder row, then press 'Open' to navigate",
+            label="Select a row and click Open to navigate into folders",
         )
         with gr.Row():
-            open_btn = gr.Button("📂 Open Selected", size="sm", variant="primary", scale=2)
-            up_btn = gr.Button("⬆️ Up One Level", size="sm", scale=1)
-            refresh_btn = gr.Button("🔄 Refresh", size="sm", scale=1)
+            open_btn = gr.Button("📂 Open", size="sm", variant="primary", scale=2)
+            up_btn = gr.Button("⬆️ Up", size="sm", scale=1)
+            refresh_btn = gr.Button("🔄", size="sm", scale=1)
 
     with gr.Row():
         # ── Left column: chat ──────────────────────────────────────────────
@@ -414,7 +420,7 @@ with gr.Blocks(
     # -- Project browser events --
     _browser_state = gr.State({"container": "raw", "prefix": ""})
 
-    def _build_listing(state: dict) -> tuple:
+    def _build_listing(state: dict, filter_text: str = "") -> tuple:
         """Return (dataframe_rows, breadcrumb_md, state)."""
         container = state["container"]
         prefix = state["prefix"]
@@ -422,19 +428,32 @@ with gr.Blocks(
 
         rows = []
         for item in items:
+            name = item["name"]
+            # Apply filter
+            if filter_text and filter_text.lower() not in name.lower():
+                continue
             if item["type"] == "folder":
-                rows.append(["📁", item["name"], "—"])
+                rows.append(["📁 Folder", name, "—", item.get("path", f"{prefix}{name}/")])
             else:
-                size_mb = (item.get("size") or 0) / 1_048_576
-                size_str = f"{size_mb:.1f} MB" if size_mb > 0.1 else f"{item.get('size', 0)} B"
-                rows.append(["📄", item["name"], size_str])
+                size = item.get("size") or 0
+                if size > 1_048_576:
+                    size_str = f"{size / 1_048_576:.1f} MB"
+                elif size > 1024:
+                    size_str = f"{size / 1024:.1f} KB"
+                else:
+                    size_str = f"{size} B"
+                rows.append(["📄 File", name, size_str, item.get("path", f"{prefix}{name}")])
 
         if not rows:
-            rows = [["", "(empty)", ""]]
+            rows = [["—", "(empty)" if not filter_text else "(no matches)", "—", ""]]
 
-        # Breadcrumb
+        # Breadcrumb with clickable segments
         parts = prefix.rstrip("/").split("/") if prefix else []
-        crumb = f"📍 **{container}:/** " + " / ".join(f"`{p}`" for p in parts) if parts else f"📍 **{container}:/** (root)"
+        if parts:
+            segments = " › ".join(f"**{p}**" for p in parts)
+            crumb = f"📍 `{container}` › {segments}"
+        else:
+            crumb = f"📍 `{container}` › /"
         return rows, crumb, state
 
     def _on_container_change(container: str, state: dict) -> tuple:
@@ -443,20 +462,23 @@ with gr.Blocks(
         rows, crumb, state = _build_listing(state)
         return rows, crumb, state
 
+    def _on_filter(filter_text: str, state: dict) -> tuple:
+        rows, crumb, state = _build_listing(state, filter_text)
+        return rows, crumb, state
+
     def _on_open(selected_data, state: dict) -> tuple:
         """Navigate into the selected folder."""
         if selected_data is not None and len(selected_data) > 0:
-            # Get the first selected row
             try:
                 if hasattr(selected_data, 'iloc'):
                     row = selected_data.iloc[0]
-                    icon = row.iloc[0] if len(row) > 0 else ""
-                    name = row.iloc[1] if len(row) > 1 else ""
+                    type_col = str(row.iloc[0]) if len(row) > 0 else ""
+                    name = str(row.iloc[1]) if len(row) > 1 else ""
                 else:
                     row = selected_data[0] if len(selected_data) > 0 else []
-                    icon = row[0] if len(row) > 0 else ""
-                    name = row[1] if len(row) > 1 else ""
-                if "📁" in str(icon) and name and name != "(empty)":
+                    type_col = str(row[0]) if len(row) > 0 else ""
+                    name = str(row[1]) if len(row) > 1 else ""
+                if "Folder" in type_col and name and name != "(empty)":
                     state["prefix"] = state["prefix"] + name + "/"
             except (IndexError, KeyError):
                 pass
@@ -474,6 +496,11 @@ with gr.Blocks(
     container_dd.change(
         _on_container_change,
         inputs=[container_dd, _browser_state],
+        outputs=[browse_listing, breadcrumb, _browser_state],
+    )
+    filter_box.change(
+        _on_filter,
+        inputs=[filter_box, _browser_state],
         outputs=[browse_listing, breadcrumb, _browser_state],
     )
     open_btn.click(
@@ -537,10 +564,16 @@ with gr.Blocks(
             outputs=[chatbot, msg_box],
         )
 
-    # Render default inline on load
+    # Render default inline and load browser on startup
+    def _initial_load():
+        state = {"container": "raw", "prefix": ""}
+        rows, crumb, state = _build_listing(state)
+        img = _render_pil(1050, True)
+        return rows, crumb, state, img
+
     demo.load(
-        lambda: _render_pil(1050, True),
-        outputs=[seismic_image],
+        _initial_load,
+        outputs=[browse_listing, breadcrumb, _browser_state, seismic_image],
     )
 
 

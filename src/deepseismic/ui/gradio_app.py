@@ -344,7 +344,6 @@ with gr.Blocks(
             col_count=(3, "fixed"),
             interactive=False,
             label="Click a folder row, then press 'Open' to navigate",
-            height=200,
         )
         with gr.Row():
             open_btn = gr.Button("📂 Open Selected", size="sm", variant="primary", scale=2)

@@ -62,7 +62,7 @@ class ABSZarrStore(MutableMapping):
         try:
             return blob.download_blob().readall()
         except ResourceNotFoundError:
-            raise KeyError(key)
+            raise KeyError(key) from None
 
     def __setitem__(self, key: str, value: bytes) -> None:
         blob = self._client.get_blob_client(self._full_key(key))
@@ -73,7 +73,7 @@ class ABSZarrStore(MutableMapping):
         try:
             blob.delete_blob()
         except ResourceNotFoundError:
-            raise KeyError(key)
+            raise KeyError(key) from None
 
     def __iter__(self) -> Iterator[str]:
         prefix = self._prefix
@@ -163,7 +163,7 @@ class StorageClient:
         try:
             return blob.download_blob().readall()
         except ResourceNotFoundError:
-            raise FileNotFoundError(f"{container}/{blob_path}")
+            raise FileNotFoundError(f"{container}/{blob_path}") from None
 
     def download_blob_to_stream(
         self,
@@ -176,7 +176,7 @@ class StorageClient:
         try:
             blob.download_blob().readinto(stream)
         except ResourceNotFoundError:
-            raise FileNotFoundError(f"{container}/{blob_path}")
+            raise FileNotFoundError(f"{container}/{blob_path}") from None
 
     def list_blobs(
         self,
@@ -199,7 +199,7 @@ class StorageClient:
         try:
             return blob.get_blob_properties()
         except ResourceNotFoundError:
-            raise FileNotFoundError(f"{container}/{blob_path}")
+            raise FileNotFoundError(f"{container}/{blob_path}") from None
 
     def delete_blob(self, container: str, blob_path: str) -> None:
         """Delete a single blob.  Raises FileNotFoundError if missing."""
@@ -207,7 +207,7 @@ class StorageClient:
         try:
             blob.delete_blob()
         except ResourceNotFoundError:
-            raise FileNotFoundError(f"{container}/{blob_path}")
+            raise FileNotFoundError(f"{container}/{blob_path}") from None
 
     def blob_exists(self, container: str, blob_path: str) -> bool:
         """Return True if the blob exists; False otherwise."""

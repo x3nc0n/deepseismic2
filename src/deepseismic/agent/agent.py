@@ -41,10 +41,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from uuid import uuid4
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -346,8 +346,7 @@ class FoundryAgent:
 
     @staticmethod
     def _yield_text_chunks(text: str) -> Generator[str, None, None]:
-        for line in text.splitlines(keepends=True):
-            yield line
+        yield from text.splitlines(keepends=True)
 
     def create_thread(self) -> str:
         """Create a new in-memory conversation thread and return its ID."""
@@ -376,6 +375,7 @@ class FoundryAgent:
                 model=self._model,
                 messages=history,
                 tools=self._tools,
+                timeout=25.0,
             )
             choice = response.choices[0]
             assistant_message = choice.message

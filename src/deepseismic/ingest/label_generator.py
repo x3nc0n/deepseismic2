@@ -493,7 +493,7 @@ class FaultMaskGenerator:
         interp_xl = interp1d(arc, arr[:, 1], kind="linear")(t_q)
         interp_s  = interp1d(arc, arr[:, 2], kind="linear")(t_q)
 
-        for il_f, xl_f, s_f in zip(interp_il, interp_xl, interp_s):
+        for il_f, xl_f, s_f in zip(interp_il, interp_xl, interp_s, strict=False):
             self._paint_voxel(il_f, xl_f, s_f)
 
     def _paint_voxel(self, il_f: float, xl_f: float, s_f: float) -> None:

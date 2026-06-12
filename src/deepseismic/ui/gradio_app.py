@@ -237,6 +237,8 @@ def _chat(
     persona: str,
 ) -> tuple[list[dict[str, str]], str]:
     """Send a message to the agent and return updated history."""
+    import time as _time
+
     if not message.strip():
         return history, ""
 
@@ -258,8 +260,13 @@ def _chat(
                 pass
 
         chunks: list[str] = []
+        start = _time.monotonic()
         for chunk in agent.chat(message):
             chunks.append(chunk)
+            # Guard against exceeding AFD idle timeout (30s default)
+            if _time.monotonic() - start > 25:
+                chunks.append("\n\n⏱️ _Response truncated — processing took too long._")
+                break
         response = "".join(chunks)
 
     except Exception as exc:

@@ -232,7 +232,7 @@ class VolumeInference:
         vol_shape: tuple[int, int, int] = seismic.shape[:3]  # type: ignore[assignment]
         n_il, n_xl, n_s = vol_shape
 
-        for dim, (vs, ps) in enumerate(zip(vol_shape, self.patch_size)):
+        for dim, (vs, ps) in enumerate(zip(vol_shape, self.patch_size, strict=False)):
             if ps > vs:
                 raise ValueError(
                     f"patch_size[{dim}]={ps} > volume dim {dim} size {vs}.  "
@@ -272,7 +272,7 @@ class VolumeInference:
                 probs  = torch.sigmoid(logits).cpu().numpy()  # (B, 1, D, H, W)
 
             # Weighted accumulation
-            for (sl_il, sl_xl, sl_s), prob_patch in zip(batch_wins, probs[:, 0]):
+            for (sl_il, sl_xl, sl_s), prob_patch in zip(batch_wins, probs[:, 0], strict=False):
                 prob_acc[sl_il, sl_xl, sl_s]   += prob_patch * self._kernel
                 weight_acc[sl_il, sl_xl, sl_s] += self._kernel
 

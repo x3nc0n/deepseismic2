@@ -256,7 +256,7 @@ class UNet3D(nn.Module):
 
         x = self.bridge(x)
 
-        for dec, skip in zip(self.decoders, reversed(skips)):
+        for dec, skip in zip(self.decoders, reversed(skips), strict=False):
             x = dec(x, skip)
 
         return self.head(x)

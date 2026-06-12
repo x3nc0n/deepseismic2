@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
@@ -61,7 +61,7 @@ _DEFAULT_SPLIT_FRACTIONS: tuple[float, float, float] = (0.70, 0.15, 0.15)
 # ---------------------------------------------------------------------------
 
 
-class Split(str, Enum):
+class Split(StrEnum):
     """Dataset subset identifier."""
 
     TRAIN = "train"
@@ -178,7 +178,7 @@ class PatchDataset(Dataset):
         st = self.config.stride  # guaranteed non-None after __post_init__
 
         # Validate patch vs volume sizes
-        for dim, (vs, p, s) in enumerate(zip(vol_shape, ps, st)):  # type: ignore[arg-type]
+        for dim, (vs, p, _s) in enumerate(zip(vol_shape, ps, st, strict=False)):  # type: ignore[arg-type]
             if p > vs:
                 raise ValueError(
                     f"patch_size[{dim}]={p} exceeds volume dim {dim} size {vs}."

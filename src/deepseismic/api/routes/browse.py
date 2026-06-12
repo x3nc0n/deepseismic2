@@ -38,30 +38,67 @@ _MOCK_TREE: dict[str, dict[str, list[BrowseItem]]] = {
         "": [BrowseItem(name="volve", path="volve/", type="folder")],
         "volve/": [
             BrowseItem(name="seismic", path="volve/seismic/", type="folder"),
-            BrowseItem(name="interpretations", path="volve/interpretations/", type="folder"),
+            BrowseItem(
+                name="interpretations", path="volve/interpretations/", type="folder"
+            ),
             BrowseItem(name="wells", path="volve/wells/", type="folder"),
         ],
         "volve/seismic/": [
-            BrowseItem(name="sample_volume.segy", path="volve/seismic/sample_volume.segy", type="file", size=44_800_000),
+            BrowseItem(
+                name="sample_volume.segy",
+                path="volve/seismic/sample_volume.segy",
+                type="file",
+                size=44_800_000,
+            ),
         ],
         "volve/interpretations/": [
-            BrowseItem(name="fault_sticks_hugin.csv", path="volve/interpretations/fault_sticks_hugin.csv", type="file", size=245_000),
-            BrowseItem(name="fault_sticks_alpha.csv", path="volve/interpretations/fault_sticks_alpha.csv", type="file", size=189_000),
-            BrowseItem(name="fault_sticks_beta.csv", path="volve/interpretations/fault_sticks_beta.csv", type="file", size=156_000),
+            BrowseItem(
+                name="fault_sticks_hugin.csv",
+                path="volve/interpretations/fault_sticks_hugin.csv",
+                type="file",
+                size=245_000,
+            ),
+            BrowseItem(
+                name="fault_sticks_alpha.csv",
+                path="volve/interpretations/fault_sticks_alpha.csv",
+                type="file",
+                size=189_000,
+            ),
+            BrowseItem(
+                name="fault_sticks_beta.csv",
+                path="volve/interpretations/fault_sticks_beta.csv",
+                type="file",
+                size=156_000,
+            ),
         ],
     },
     "staged": {
         "": [BrowseItem(name="volve", path="volve/", type="folder")],
         "volve/": [BrowseItem(name="zarr", path="volve/zarr/", type="folder")],
         "volve/zarr/": [
-            BrowseItem(name="seismic_volume.zarr", path="volve/zarr/seismic_volume.zarr/", type="folder", size=44_800_000),
-            BrowseItem(name="fault_prob.zarr", path="volve/zarr/fault_prob.zarr/", type="folder", size=22_400_000),
+            BrowseItem(
+                name="seismic_volume.zarr",
+                path="volve/zarr/seismic_volume.zarr/",
+                type="folder",
+                size=44_800_000,
+            ),
+            BrowseItem(
+                name="fault_prob.zarr",
+                path="volve/zarr/fault_prob.zarr/",
+                type="folder",
+                size=22_400_000,
+            ),
         ],
     },
     "results": {
         "": [BrowseItem(name="volve", path="volve/", type="folder")],
         "volve/": [
-            BrowseItem(name="fault_detection_run_001.json", path="volve/fault_detection_run_001.json", type="file", size=4_200),
+            BrowseItem(
+                name="fault_detection_run_001.json",
+                path="volve/fault_detection_run_001.json",
+                type="file",
+                size=4_200,
+            ),
         ],
     },
 }
@@ -125,4 +162,4 @@ def browse_container(
         return BrowseResponse(container=container, prefix=prefix, items=items)
 
     except Exception as exc:
-        raise HTTPException(500, f"Storage browse failed: {exc}")
+        raise HTTPException(500, f"Storage browse failed: {exc}") from exc

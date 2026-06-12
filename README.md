@@ -1,5 +1,9 @@
 # DeepSeismic2
 
+[![CI](https://github.com/x3nc0n/deepseismic2/actions/workflows/ci.yml/badge.svg)](https://github.com/x3nc0n/deepseismic2/actions/workflows/ci.yml)
+[![Deploy Infra](https://github.com/Spava-Corp/deepseismic2-infra/actions/workflows/deploy-infra.yml/badge.svg)](https://github.com/Spava-Corp/deepseismic2-infra/actions/workflows/deploy-infra.yml)
+[![Validate Bicep](https://github.com/Spava-Corp/deepseismic2-infra/actions/workflows/validate-bicep.yml/badge.svg)](https://github.com/Spava-Corp/deepseismic2-infra/actions/workflows/validate-bicep.yml)
+
 DeepSeismic2 is a proof-of-concept for modernizing seismic interpretation workflows with cloud-native data handling, ML inference, and AI-assisted analyst experiences. The goal is to prove that a lightweight Azure-first stack can replace expensive, workstation-bound legacy tooling for a constrained exploration workflow built around the Equinor Volve dataset.
 
 ## Why this project exists

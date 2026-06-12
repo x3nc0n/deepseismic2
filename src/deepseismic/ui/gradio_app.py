@@ -240,26 +240,30 @@ def _chat(
     if not message.strip():
         return history, ""
 
-    agent = _get_agent()
+    try:
+        agent = _get_agent()
 
-    # Apply persona if changed
-    persona_map = {
-        "Auto": None,
-        "Geophysics (Ash)": "geophysics",
-        "Geology (Kane)": "geology",
-        "Geoengineering (Brett)": "geoengineering",
-    }
-    requested = persona_map.get(persona)
-    if requested and agent.persona != requested:
-        try:
-            agent.set_persona(requested)
-        except ValueError:
-            pass
+        # Apply persona if changed
+        persona_map = {
+            "Auto": None,
+            "Geophysics (Ash)": "geophysics",
+            "Geology (Kane)": "geology",
+            "Geoengineering (Brett)": "geoengineering",
+        }
+        requested = persona_map.get(persona)
+        if requested and agent.persona != requested:
+            try:
+                agent.set_persona(requested)
+            except (ValueError, AttributeError):
+                pass
 
-    chunks: list[str] = []
-    for chunk in agent.chat(message):
-        chunks.append(chunk)
-    response = "".join(chunks)
+        chunks: list[str] = []
+        for chunk in agent.chat(message):
+            chunks.append(chunk)
+        response = "".join(chunks)
+
+    except Exception as exc:
+        response = f"⚠️ **Agent error**: {type(exc).__name__}: {exc}"
 
     history = history + [
         {"role": "user", "content": message},
@@ -333,22 +337,19 @@ with gr.Blocks(
                 interactive=True,
                 scale=1,
             )
-            path_display = gr.Textbox(
-                value="/",
-                label="Current Path",
-                interactive=False,
-                scale=3,
-            )
+            breadcrumb = gr.Markdown("📍 **/ (root)**", elem_id="breadcrumb")
+        browse_listing = gr.Dataframe(
+            headers=["", "Name", "Size"],
+            datatype=["str", "str", "str"],
+            col_count=(3, "fixed"),
+            interactive=False,
+            label="Click a folder row, then press 'Open' to navigate",
+            height=200,
+        )
         with gr.Row():
-            folder_dd = gr.Dropdown(
-                choices=[],
-                label="Navigate to folder",
-                interactive=True,
-                scale=2,
-            )
-            nav_btn = gr.Button("Open →", size="sm", scale=1)
-            up_btn = gr.Button("↑ Up", size="sm", scale=1)
-        browse_output = gr.Markdown("_Select a container to browse._")
+            open_btn = gr.Button("📂 Open Selected", size="sm", variant="primary", scale=2)
+            up_btn = gr.Button("⬆️ Up One Level", size="sm", scale=1)
+            refresh_btn = gr.Button("🔄 Refresh", size="sm", scale=1)
 
     with gr.Row():
         # ── Left column: chat ──────────────────────────────────────────────
@@ -414,48 +415,82 @@ with gr.Blocks(
     # -- Project browser events --
     _browser_state = gr.State({"container": "raw", "prefix": ""})
 
-    def _refresh_browser(state: dict) -> tuple:
+    def _build_listing(state: dict) -> tuple:
+        """Return (dataframe_rows, breadcrumb_md, state)."""
         container = state["container"]
         prefix = state["prefix"]
-        tree = _format_browse_tree(container, prefix)
-        folders = _get_project_choices(container, prefix)
-        path_str = f"/{prefix}" if prefix else "/"
-        return tree, gr.update(choices=folders, value=None), path_str
+        items = _browse_storage(container, prefix)
+
+        rows = []
+        for item in items:
+            if item["type"] == "folder":
+                rows.append(["📁", item["name"], "—"])
+            else:
+                size_mb = (item.get("size") or 0) / 1_048_576
+                size_str = f"{size_mb:.1f} MB" if size_mb > 0.1 else f"{item.get('size', 0)} B"
+                rows.append(["📄", item["name"], size_str])
+
+        if not rows:
+            rows = [["", "(empty)", ""]]
+
+        # Breadcrumb
+        parts = prefix.rstrip("/").split("/") if prefix else []
+        crumb = f"📍 **{container}:/** " + " / ".join(f"`{p}`" for p in parts) if parts else f"📍 **{container}:/** (root)"
+        return rows, crumb, state
 
     def _on_container_change(container: str, state: dict) -> tuple:
         state["container"] = container
         state["prefix"] = ""
-        tree, folders, path_str = _refresh_browser(state)
-        return tree, folders, path_str, state
+        rows, crumb, state = _build_listing(state)
+        return rows, crumb, state
 
-    def _on_navigate(folder: str | None, state: dict) -> tuple:
-        if folder:
-            state["prefix"] = state["prefix"] + folder + "/"
-        tree, folders, path_str = _refresh_browser(state)
-        return tree, folders, path_str, state
+    def _on_open(selected_data, state: dict) -> tuple:
+        """Navigate into the selected folder."""
+        if selected_data is not None and len(selected_data) > 0:
+            # Get the first selected row
+            try:
+                if hasattr(selected_data, 'iloc'):
+                    row = selected_data.iloc[0]
+                    icon = row.iloc[0] if len(row) > 0 else ""
+                    name = row.iloc[1] if len(row) > 1 else ""
+                else:
+                    row = selected_data[0] if len(selected_data) > 0 else []
+                    icon = row[0] if len(row) > 0 else ""
+                    name = row[1] if len(row) > 1 else ""
+                if "📁" in str(icon) and name and name != "(empty)":
+                    state["prefix"] = state["prefix"] + name + "/"
+            except (IndexError, KeyError):
+                pass
+        rows, crumb, state = _build_listing(state)
+        return rows, crumb, state
 
     def _on_up(state: dict) -> tuple:
         prefix = state["prefix"]
         if prefix:
             parts = prefix.rstrip("/").split("/")
             state["prefix"] = "/".join(parts[:-1]) + "/" if len(parts) > 1 else ""
-        tree, folders, path_str = _refresh_browser(state)
-        return tree, folders, path_str, state
+        rows, crumb, state = _build_listing(state)
+        return rows, crumb, state
 
     container_dd.change(
         _on_container_change,
         inputs=[container_dd, _browser_state],
-        outputs=[browse_output, folder_dd, path_display, _browser_state],
+        outputs=[browse_listing, breadcrumb, _browser_state],
     )
-    nav_btn.click(
-        _on_navigate,
-        inputs=[folder_dd, _browser_state],
-        outputs=[browse_output, folder_dd, path_display, _browser_state],
+    open_btn.click(
+        _on_open,
+        inputs=[browse_listing, _browser_state],
+        outputs=[browse_listing, breadcrumb, _browser_state],
     )
     up_btn.click(
         _on_up,
         inputs=[_browser_state],
-        outputs=[browse_output, folder_dd, path_display, _browser_state],
+        outputs=[browse_listing, breadcrumb, _browser_state],
+    )
+    refresh_btn.click(
+        lambda state: _build_listing(state),
+        inputs=[_browser_state],
+        outputs=[browse_listing, breadcrumb, _browser_state],
     )
 
     # -- Chat events --

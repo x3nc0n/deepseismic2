@@ -285,20 +285,24 @@ class MockAgent:
 # ---------------------------------------------------------------------------
 
 class FoundryAgent:
-    """Azure AI Foundry chat client backed by OpenAI-style function calling."""
+    """Azure OpenAI chat client backed by function calling with local tool dispatch."""
 
     def __init__(self, persona: str | None = None) -> None:
-        from azure.ai.projects import AIProjectClient
         from azure.identity import DefaultAzureCredential
+        from openai import AzureOpenAI
 
         endpoint = os.environ["AZURE_PROJECT_ENDPOINT"]
-        self._client = AIProjectClient(
-            endpoint=endpoint,
-            credential=DefaultAzureCredential(),
+        credential = DefaultAzureCredential()
+        token = credential.get_token("https://cognitiveservices.azure.com/.default")
+
+        self._openai_client = AzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=token.token,
+            api_version="2024-12-01-preview",
         )
+        self._credential = credential
         self._persona = persona
-        self._model = os.environ.get("AZURE_OPENAI_MODEL", "gpt-4o")
-        self._openai_client = self._client.get_openai_client()
+        self._model = os.environ.get("AZURE_OPENAI_MODEL", "chat")
         self._tools = self._build_tools()
         self._threads: dict[str, list[dict[str, Any]]] = {}
 

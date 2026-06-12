@@ -93,23 +93,113 @@ def _get_project_choices(container: str, prefix: str = "") -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Synthetic seismic rendering
+# Seismic rendering — reads from API or falls back to synthetic
 # ---------------------------------------------------------------------------
+
+def _fetch_inline_from_api(survey_id: str, inline: int) -> dict | None:
+    """Fetch inline slice data from the API. Returns None on failure."""
+    import requests
+    try:
+        resp = requests.get(
+            f"{API_BASE_URL}/api/surveys/{survey_id}/inline/{inline}",
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
+
 
 def _render_section_image(
     inline: int,
     show_fault_overlay: bool = True,
+    survey_id: str = "volve",
     dpi: int = 120,
 ) -> bytes:
     """Render a seismic inline section as PNG bytes.
 
-    Returns a synthetic placeholder section for demo purposes.
-    Replace with a real Zarr read when live data is available.
+    Tries to load real data from the API first; falls back to synthetic
+    placeholder if no ingested data is available.
     """
+    api_data = _fetch_inline_from_api(survey_id, inline)
+
+    if api_data and api_data.get("amplitude"):
+        # Real data path
+        amplitude = np.array(api_data["amplitude"], dtype=np.float32)
+        crosslines = api_data.get("crossline_coords", list(range(amplitude.shape[1])))
+        twtt = api_data.get("twtt_ms", list(range(amplitude.shape[0])))
+        title_suffix = f"{survey_id} survey"
+        extent = [min(crosslines), max(crosslines), max(twtt), min(twtt)]
+    else:
+        # Synthetic fallback
+        amplitude, extent, title_suffix = _generate_synthetic_section(inline)
+
+    # Normalize for display
+    amax = np.abs(amplitude).max()
+    if amax > 1e-9:
+        amplitude = amplitude / amax
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(8, 5), facecolor="#0d1520", dpi=dpi)
+    ax.set_facecolor("#0d1520")
+
+    ax.imshow(
+        amplitude,
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=-0.8,
+        vmax=0.8,
+        interpolation="bilinear",
+        extent=extent,
+    )
+
+    if show_fault_overlay and not api_data:
+        # Only show synthetic fault overlay when using fake data
+        n_samples, n_crosslines = amplitude.shape
+        mask = np.zeros_like(amplitude)
+        xl_fault = int(n_crosslines * 0.37 + (inline - 1000) * 0.03)
+        xl_fault = max(5, min(n_crosslines - 5, xl_fault))
+        for xl in range(max(0, xl_fault - 8), min(n_crosslines, xl_fault + 8)):
+            prob = 1.0 - abs(xl - xl_fault) / 9.0
+            mask[int(n_samples * 0.4):, xl] = np.clip(prob * 0.85, 0, 1)
+        fault_cmap = LinearSegmentedColormap.from_list(
+            "fault", ["#ff000000", "#ff6600cc", "#ffdd00ee"], N=256
+        )
+        ax.imshow(
+            mask,
+            aspect="auto",
+            cmap=fault_cmap,
+            vmin=0, vmax=1,
+            alpha=0.55,
+            interpolation="bilinear",
+            extent=extent,
+        )
+
+    ax.set_xlabel("Crossline", color="#94a3b8", fontsize=9)
+    ax.set_ylabel("Two-way time (ms)", color="#94a3b8", fontsize=9)
+    is_real = "— real data" if api_data else "— synthetic placeholder"
+    ax.set_title(
+        f"Inline {inline}  —  {title_suffix}  ({is_real})",
+        color="#e2e8f0", fontsize=9.5, pad=7,
+    )
+    ax.tick_params(colors="#64748b", labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#334155")
+
+    fig.tight_layout(pad=0.8)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+def _generate_synthetic_section(inline: int) -> tuple[np.ndarray, list, str]:
+    """Generate a synthetic seismic section for demo/fallback."""
     rng = np.random.default_rng(inline)
     n_samples, n_crosslines = 200, 150
 
-    # Bandlimited noise
     data = rng.standard_normal((n_samples, n_crosslines))
     t = np.linspace(-0.05, 0.05, 21)
     peak_freq = 30
@@ -117,7 +207,6 @@ def _render_section_image(
         -((np.pi * peak_freq * t) ** 2)
     )
     from scipy.signal import convolve
-
     for xl in range(n_crosslines):
         data[:, xl] = convolve(data[:, xl], wavelet, mode="same")
 
@@ -130,74 +219,12 @@ def _render_section_image(
             s = max(0, min(n_samples - width, layer + offset))
             data[s : s + width, xl] += amp * rng.standard_normal()
 
-    # Bright amplitude anomaly (Hugin Fm fluid indicator simulation)
+    # Bright amplitude anomaly
     xl_start, xl_end = int(n_crosslines * 0.3), int(n_crosslines * 0.7)
     data[162:172, xl_start:xl_end] += 3.5
 
-    data /= np.abs(data).max() + 1e-9
-
-    # Fault probability mask
-    mask = np.zeros((n_samples, n_crosslines), dtype=np.float32)
-    if show_fault_overlay:
-        xl_fault = int(n_crosslines * 0.37 + (inline - 1000) * 0.03)
-        xl_fault = max(5, min(n_crosslines - 5, xl_fault))
-        for xl in range(max(0, xl_fault - 8), min(n_crosslines, xl_fault + 8)):
-            prob = 1.0 - abs(xl - xl_fault) / 9.0
-            mask[80:, xl] = np.clip(prob * 0.85, 0, 1)
-
-    # Plot
-    fig, ax = plt.subplots(figsize=(8, 5), facecolor="#0d1520", dpi=dpi)
-    ax.set_facecolor("#0d1520")
-
-    ax.imshow(
-        data,
-        aspect="auto",
-        cmap="RdBu_r",
-        vmin=-0.8,
-        vmax=0.8,
-        interpolation="bilinear",
-        extent=[950, 1100, 4000, 0],
-    )
-
-    if show_fault_overlay:
-        fault_cmap = LinearSegmentedColormap.from_list(
-            "fault", ["#ff000000", "#ff6600cc", "#ffdd00ee"], N=256
-        )
-        ax.imshow(
-            mask,
-            aspect="auto",
-            cmap=fault_cmap,
-            vmin=0,
-            vmax=1,
-            alpha=0.55,
-            interpolation="bilinear",
-            extent=[950, 1100, 4000, 0],
-        )
-
-    ax.axhline(y=3500, color="#22c55e", linewidth=1.2, linestyle="--", alpha=0.85)
-    ax.text(1096, 3440, "Hugin Fm top", color="#22c55e", fontsize=8, ha="right")
-    ax.axhline(y=3380, color="#94a3b8", linewidth=0.8, linestyle=":", alpha=0.65)
-    ax.text(1096, 3320, "Draupne Fm (seal)", color="#94a3b8", fontsize=7.5, ha="right")
-
-    ax.set_xlabel("Crossline", color="#94a3b8", fontsize=9)
-    ax.set_ylabel("Two-way time (ms)", color="#94a3b8", fontsize=9)
-    ax.set_title(
-        f"Inline {inline}  —  Volve Survey A  (synthetic placeholder)",
-        color="#e2e8f0",
-        fontsize=9.5,
-        pad=7,
-    )
-    ax.tick_params(colors="#64748b", labelsize=8)
-    for spine in ax.spines.values():
-        spine.set_edgecolor("#334155")
-
-    fig.tight_layout(pad=0.8)
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    extent = [950, 1100, 4000, 0]
+    return data, extent, "Volve Survey A"
 
 
 # ---------------------------------------------------------------------------

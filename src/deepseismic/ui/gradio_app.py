@@ -30,7 +30,12 @@ from matplotlib.colors import LinearSegmentedColormap
 matplotlib.use("Agg")  # Non-interactive backend for server rendering
 
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
-API_BASE_URL: str = os.environ.get("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL: str = (
+    os.environ.get("API_BASE_URL")
+    or os.environ.get("DEEPSEISMIC_API_URL")
+    or os.environ.get("BACKEND_URL")
+    or "http://localhost:8000"
+)
 
 # ---------------------------------------------------------------------------
 # Agent singleton (one per server process)

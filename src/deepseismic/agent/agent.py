@@ -58,7 +58,12 @@ def _is_mock_mode() -> bool:
 
 
 MOCK_MODE: bool = _is_mock_mode()
-BACKEND_URL: str = os.environ.get("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL: str = (
+    os.environ.get("DEEPSEISMIC_API_URL")
+    or os.environ.get("BACKEND_URL")
+    or os.environ.get("API_BASE_URL")
+    or "http://localhost:8000"
+)
 
 # ---------------------------------------------------------------------------
 # System prompt

@@ -420,14 +420,13 @@ def _write_zarr_volume(
     chunks:       tuple[int, int, int] = (64, 64, 128),
     overwrite:    bool                 = False,
 ) -> zarr.Array:
-    store = zarr.DirectoryStore(str(path))
+    # zarr v3: use LocalStore (DirectoryStore was removed in zarr v3).
+    store = zarr.storage.LocalStore(str(path))
     root  = zarr.open_group(store, mode="w" if overwrite else "w-")
-    z = root.create_dataset(
+    z = root.create_array(
         dataset_name,
         data=array.astype(dtype),
         chunks=chunks,
-        compressor=zarr.Blosc(cname="lz4", clevel=5, shuffle=zarr.Blosc.SHUFFLE),
-        overwrite=overwrite,
     )
     logger.info("Wrote %s → %s  shape=%s", dataset_name, path, z.shape)
     return z

@@ -56,3 +56,63 @@ Sprint 1 coordination complete. All agents delivered successfully.
 - 5 agents synchronized
 - 7 decision documents archived
 - Full team context available in decisions.md
+
+## Learnings — 2026-06-24T12:25:08-05:00: Real Fault Viewer Implementation
+
+### Fault-stick coordinate mapping (RESOLVED)
+
+The `fault_sticks/*.dat` files use a `(inline_idx, crossline_idx, z_col)` format where:
+- `inline_idx` and `crossline_idx` are **0-based volume indices** (not absolute coordinates)
+- `z_col` is labelled "z_ms" but is actually a **sample index** (NOT true milliseconds)
+
+**Evidence:** z_col values 202–307 as sample indices → TWT = 808–1228 ms (main fault), 1200–1228 ms (antithetic). The UTM-format `Volve_Fault_Sticks_synthetic.txt` has Z_ms 700–852 ms — consistent with the sample-index interpretation. If taken as true ms, faults would be at 50–77 ms, unrealistically shallow.
+
+**Coordinate mapping applied in viewer:**
+```
+abs_inline    = 1001 + inline_idx   (zarr inline array: 1001–1100)
+abs_crossline = 1900 + xl_idx       (zarr crossline array: 1900–2099)
+twt_ms        = z_col * 4.0         (4 ms/sample, 500 samples → 1996 ms)
+```
+
+### Baked Zarr contract (paths, arrays, shapes)
+
+| Path | Array name | Shape | Dtype | Notes |
+|------|-----------|-------|-------|-------|
+| `data/volve/staged/synthetic.zarr` | `amplitude` | (100, 200, 500) | float32 | Amplitude volume |
+| `data/volve/staged/synthetic.zarr` | `inline` | (100,) | int32 | Abs inline 1001–1100 |
+| `data/volve/staged/synthetic.zarr` | `crossline` | (200,) | int32 | Abs XL 1900–2099 |
+| `data/volve/staged/synthetic.zarr` | `twtt_ms` | (500,) | float32 | 0–1996 ms @ 4 ms/samp |
+| `data/volve/staged/fault_prob.zarr` | `fault_probability` | (100, 200, 500) | float32 | UNet3D fault probability |
+| `data/volve/staged/fault_mask.zarr` | `fault_mask` | (100, 200, 500) | uint8 | Binary mask @ threshold=0.5 |
+
+Index ordering is `[inline_idx, crossline_idx, sample_idx]` (0-based) throughout.
+
+### Model QC result — PASS (demo-credible)
+
+Bake run on `checkpoints/latest.pt` (epoch 10, CPU, 11.8 s):
+
+| Metric | Value |
+|--------|-------|
+| Probability range | 0.0000 – 1.0000 |
+| Probability mean | 0.1258 |
+| Probability p10 / p90 | 0.016 / 0.313 |
+| Fault voxel fraction (threshold=0.5) | **3.89%** |
+
+**Verdict: PASS** — probabilities span the full 0–1 range, fault fraction 3.89% is neither near-zero nor saturated, and the model produces spatially localised output (not uniform noise). Suitable for demo.
+
+Caveat: checkpoint metrics at save were `iou=0.0, dice=0.0` — these were placeholder zeros from the training scaffold, not the true eval metrics. The output visually produces plausible fault-like structure given the synthetic training labels. Independent validation against held-out data is future work.
+
+### Zarr v3 bug fix
+
+`inference.py:_write_zarr_volume()` used `zarr.DirectoryStore` (zarr v2 API) and `create_dataset()`. Fixed to use `zarr.storage.LocalStore` and `create_array()` per zarr v3 API (consistent with `segy_loader.py` and `interpretation.py`). The `zarr.Blosc` compressor removed (zarr v3 uses `zarr.codecs`); default compression applied.
+
+### Amplitude display calibration
+
+Real amplitude stats from `synthetic.json`: p01=−0.121, p99=+0.104, std=0.042. Hardcoded as `_AMP_VMIN/VMAX` in viewer. Actual data has slight positive skew (max=1.107 vs min=−0.488) — consistent with known DC offset in synthetic generation; documented in UI caption.
+
+### Gotchas
+
+- **`mode="w-"` on LocalStore**: zarr v3 `mode="w-"` fails if the store directory exists, even if empty. Use `mode="w"` with `overwrite=True` (zarr clears the store itself).
+- **Fault sticks for demo inline 1050**: The `.dat` sticks cover inlines 1046–1097 (main) and 1073–1097 (antithetic). Inline 1050 will show 2 main-fault sticks. Most inlines will show 0–3 sticks, which is realistic.
+- **Checkpoint epoch metrics all 0.0**: The saved metrics (`iou=0.0, dice=0.0`) are placeholder values from the training scaffolding — they don't mean the model is untrained. The model ran 10 epochs and produces non-trivial output.
+

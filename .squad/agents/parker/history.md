@@ -49,3 +49,12 @@ Sprint 1 coordination complete. All agents delivered successfully.
 - 5 agents synchronized
 - 7 decision documents archived
 - Full team context available in decisions.md
+
+## Scribe Cross-Agent Update — 2026-06-24T12:41:40-05:00
+
+Phase 1 (Real Fault Viewer) complete. Infra deployment follow-up required:
+- **For Phase 2:** Deploy updated Streamlit UI + updated FastAPI backend to hosted demo.
+- **New artifacts to stage:** Baked fault probability Zarr volumes (ault_prob.zarr, ault_mask.zarr) must be available at deployment time alongside amplitude volumes in cloud storage.
+- **Deployment scope:** Copy Phase 1 code changes (src/, scripts/) to infra repo; verify bake script runs successfully in deployment environment; stage checkpoint (checkpoints/latest.pt) and baked Zarr output to blob storage before demo launch.
+- **No infrastructure changes:** Compute size, storage tier, Container Apps config remain unchanged. This is a data/code update, not an infra scaling event.
+- **Timeline:** Deploy after Phase 1 feature PR merges and tests pass.

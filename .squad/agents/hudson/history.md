@@ -47,6 +47,36 @@
 
 **CI status:** 77 passed, 2 skipped (CUDA, extract_metadata stub), 5 deselected (integration) — **green**.
 
+### 2026-06-24 — Phase 1 Real-Data Viewer Tests
+
+**Session:** Added `src/tests/test_viewer/test_viewer.py` to cover Dallas's real-data viewer implementation (29 new tests; suite: 131 passed, 5 skipped).
+
+**What was tested:**
+
+1. **Amplitude reader** (7 tests) — verified `_get_amplitude_slice` logic against real `data/volve/staged/synthetic.zarr` (100×200×500 float32). Pinned: shape (200, 500), index 0 = inline 1001, index 99 = inline 1100, out-of-range clamping (both directions), no NaN/Inf.
+
+2. **Fault prob reader** (5 tests) — verified `_get_fault_prob_slice` logic against `data/volve/staged/fault_prob.zarr`. Pinned: shape (200, 500), all values ∈ [0, 1], no NaN/Inf. **Missing-bake path** confirmed to return `None` not raise.
+
+3. **Fault-stick coordinate mapping** (8 tests — highest value) — regression guard for z_ms = sample index bug. Pinned:
+   - Main fault: TWT 808–908 ms (z_samples 202–227 × 4.0 ms)
+   - Antithetic fault: TWT 1200–1228 ms (z_samples 300–307 × 4.0 ms)
+   - First row exact mapping: dat(45, 84, 202) → abs_il=1046, abs_xl=1984, twt=808.0 ms
+   - Inline 0-based → absolute: +1001; Crossline 0-based → absolute: +1900
+   - Any regression re-introducing raw-z-as-ms (values 202–307 ms) will fail loudly on `>=800 ms` guard.
+
+4. **`_write_zarr_volume` zarr v3 roundtrip** (5 tests) — float32 and uint8, shape/dtype/value exact match. `overwrite=False` raises `FileExistsError` (zarr v3 builtins.FileExistsError on mode="w-"). `overwrite=True` replaces data cleanly. Custom chunk shape preserved in metadata.
+
+5. **Viewer module regression guard** (4 tests) — AST-level: `streamlit_app.py` parses without SyntaxError; all 5 key functions present; array names `amplitude` and `fault_probability` confirmed in source.
+
+**Coupling / testability finding (flagged for Dallas):**
+- `_get_amplitude_slice`, `_get_fault_prob_slice`, and `_load_fault_sticks` are decorated with `@st.cache_data` and `streamlit_app.py` runs top-level Streamlit calls + sidebar rendering at import time. The module is un-importable in pytest without a comprehensive Streamlit mock (which fights the module's own side-effects). Tests replicate the reader logic directly. **Recommend Dallas extract reader logic into `deepseismic/ui/_data_readers.py`** (no Streamlit dependency) so they can be tested in isolation.
+
+**Marker decision:** Tests use real local zarr files (not Azurite/Azure/GPU). Per project convention, `@pytest.mark.integration` is reserved for infrastructure-dependent tests. These tests are **unmarked** and run in standard CI.
+
+**zarr v3 note:** `zarr.open_group(store, mode="w-")` raises `builtins.FileExistsError` (not a zarr-specific type) when the store already contains data.
+
+**Suite delta:** 102→131 passed (+29), 5 skipped unchanged, ruff clean.
+
 ## Scribe Cross-Agent Update — 2026-06-10T04:30-05:00
 Sprint 1 coordination complete. All agents delivered successfully.
 - 5 agents synchronized

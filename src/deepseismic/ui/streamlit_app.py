@@ -12,11 +12,19 @@ Run with::
 Or in mock mode::
 
     MOCK_LLM=true streamlit run src/deepseismic/ui/streamlit_app.py
+
+Data prerequisites
+------------------
+- Amplitude Zarr:     data/volve/staged/synthetic.zarr
+- Fault prob Zarr:    data/volve/staged/fault_prob.zarr  (run scripts/bake_demo_faults.py first)
+- Fault mask Zarr:    data/volve/staged/fault_mask.zarr
+- Fault sticks:       data/volve/interpretations/fault_sticks/*.dat
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 import streamlit as st
@@ -89,6 +97,20 @@ _CSS = """
 st.markdown(_CSS, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
+# Data paths (relative to repo root)
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT  = Path(__file__).resolve().parents[3]
+_ZARR_AMP   = _REPO_ROOT / "data/volve/staged/synthetic.zarr"
+_ZARR_PROB  = _REPO_ROOT / "data/volve/staged/fault_prob.zarr"
+_ZARR_MASK  = _REPO_ROOT / "data/volve/staged/fault_mask.zarr"
+_STICKS_DIR = _REPO_ROOT / "data/volve/interpretations/fault_sticks"
+
+# Known amplitude clip values from synthetic.json sidecar (p01/p99)
+_AMP_VMIN: float = -0.121
+_AMP_VMAX: float = 0.104
+
+# ---------------------------------------------------------------------------
 # Session-state initialisation
 # ---------------------------------------------------------------------------
 
@@ -105,143 +127,180 @@ def _init_session() -> None:
         st.session_state.selected_inline = 1050
     if "show_fault_overlay" not in st.session_state:
         st.session_state.show_fault_overlay = True
+    if "fault_threshold" not in st.session_state:
+        st.session_state.fault_threshold = 0.5
 
 
 _init_session()
 
 # ---------------------------------------------------------------------------
-# Synthetic seismic data (placeholder until live data path is wired up)
+# Real seismic data readers (cached)
 # ---------------------------------------------------------------------------
 
+
 @st.cache_data(show_spinner=False)
-def _generate_synthetic_section(
-    inline: int,
-    n_crosslines: int = 150,
-    n_samples: int = 200,
-    seed: int | None = None,
-) -> np.ndarray:
-    """Generate a visually plausible synthetic seismic inline section."""
-    rng = np.random.default_rng(seed if seed is not None else inline)
-
-    # Base: bandlimited noise convolved with a Ricker wavelet
-    data = rng.standard_normal((n_samples, n_crosslines))
-
-    # Ricker wavelet (30 Hz equivalent)
-    t = np.linspace(-0.05, 0.05, 21)
-    peak_freq = 30
-    wavelet = (1 - 2 * (np.pi * peak_freq * t) ** 2) * np.exp(
-        -((np.pi * peak_freq * t) ** 2)
+def _get_volume_coords() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (inline_arr, crossline_arr, twtt_ms_arr) from the amplitude Zarr."""
+    import zarr
+    root = zarr.open_group(str(_ZARR_AMP), mode="r")
+    return (
+        np.asarray(root["inline"][:]),
+        np.asarray(root["crossline"][:]),
+        np.asarray(root["twtt_ms"][:]),
     )
-    from scipy.signal import convolve
-    for xl in range(n_crosslines):
-        data[:, xl] = convolve(data[:, xl], wavelet, mode="same")
-
-    # Add layered reflectors (stratigraphic events)
-    for layer_sample, amplitude, width in [
-        (60, 0.8, 5),    # shallow reflector (Shetland)
-        (100, 1.5, 6),   # mid-section
-        (155, 2.2, 8),   # Draupne seal
-        (168, 3.0, 9),   # Hugin reservoir top
-        (180, 1.8, 7),   # Hugin base
-    ]:
-        for xl in range(n_crosslines):
-            # Slight structural dip
-            sample_offset = int(xl * 0.04 - n_crosslines * 0.02)
-            s = max(0, min(n_samples - width, layer_sample + sample_offset))
-            data[s : s + width, xl] += amplitude * rng.standard_normal()
-
-    # Bright spot anomaly near Hugin Fm top (fluid indicator simulation)
-    xl_start, xl_end = int(n_crosslines * 0.3), int(n_crosslines * 0.7)
-    for xl in range(xl_start, xl_end):
-        data[162:172, xl] += 4.0  # elevated amplitude
-
-    # Normalise
-    data /= np.abs(data).max() + 1e-9
-    return data
 
 
 @st.cache_data(show_spinner=False)
-def _generate_fault_mask(
+def _get_amplitude_slice(inline_abs: int) -> np.ndarray:
+    """Return (n_xl, n_s) float32 amplitude slice for the given absolute inline."""
+    import zarr
+    root = zarr.open_group(str(_ZARR_AMP), mode="r")
+    il_arr, _, _ = _get_volume_coords()
+    idx = int(np.clip(np.searchsorted(il_arr, inline_abs), 0, len(il_arr) - 1))
+    return np.asarray(root["amplitude"][idx, :, :], dtype=np.float32)
+
+
+@st.cache_data(show_spinner=False)
+def _get_fault_prob_slice(inline_abs: int) -> np.ndarray | None:
+    """Return (n_xl, n_s) fault probability slice, or None if bake not available."""
+    if not _ZARR_PROB.exists():
+        return None
+    import zarr
+    root = zarr.open_group(str(_ZARR_PROB), mode="r")
+    il_arr, _, _ = _get_volume_coords()
+    idx = int(np.clip(np.searchsorted(il_arr, inline_abs), 0, len(il_arr) - 1))
+    return np.asarray(root["fault_probability"][idx, :, :], dtype=np.float32)
+
+
+@st.cache_data(show_spinner=False)
+def _load_fault_sticks() -> dict[str, np.ndarray]:
+    """Parse .dat fault sticks.
+
+    Returns dict of fault_name -> (N, 3) float32 array where columns are:
+        [abs_inline, abs_crossline, twt_ms]
+
+    Coordinate mapping for .dat files:
+        inline col     = 0-based volume index  →  abs_inline  = 1001 + idx
+        crossline col  = 0-based volume index  →  abs_crossline = 1900 + idx
+        z_ms col       = SAMPLE INDEX (not true ms)  →  twt_ms = z_sample * 4.0
+    Evidence: z_sample values 202-307 -> TWT 808-1228 ms, consistent with the
+    UTM-format file (Volve_Fault_Sticks_synthetic.txt) showing Z_ms 700-852 ms.
+    If interpreted as true ms (50-77 ms, <7% depth), faults would be unrealistically shallow.
+    """
+    sticks: dict[str, np.ndarray] = {}
+    if not _STICKS_DIR.exists():
+        return sticks
+    for dat_file in sorted(_STICKS_DIR.glob("*.dat")):
+        rows: list[tuple[float, float, float]] = []
+        with open(dat_file) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) == 3:
+                    il_idx, xl_idx, z_samp = int(parts[0]), int(parts[1]), int(parts[2])
+                    # 0-based volume index → absolute coordinate
+                    abs_il = 1001 + il_idx
+                    abs_xl = 1900 + xl_idx
+                    # z column is sample index, not milliseconds
+                    twt_ms = float(z_samp) * 4.0
+                    rows.append((float(abs_il), float(abs_xl), twt_ms))
+        if rows:
+            sticks[dat_file.stem] = np.array(rows, dtype=np.float32)
+    return sticks
+
+
+# ---------------------------------------------------------------------------
+# Seismic viewer rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_seismic_section(
     inline: int,
-    n_crosslines: int = 150,
-    n_samples: int = 200,
-) -> np.ndarray:
-    """Generate a simple probabilistic fault mask for overlay display."""
-    mask = np.zeros((n_samples, n_crosslines), dtype=np.float32)
-    # Simulated fault corridor around XL 50–70 range
-    xl_fault = int(n_crosslines * 0.37 + (inline - 1000) * 0.03)
-    xl_fault = max(5, min(n_crosslines - 5, xl_fault))
-    for xl in range(max(0, xl_fault - 8), min(n_crosslines, xl_fault + 8)):
-        prob = 1.0 - abs(xl - xl_fault) / 9.0
-        mask[80:, xl] = np.clip(prob * 0.85, 0, 1)
-    return mask
-
-
-def _render_seismic_section(inline: int, show_overlay: bool) -> None:
-    """Render a seismic inline section with optional fault probability overlay."""
+    show_overlay: bool,
+    fault_threshold: float,
+) -> None:
+    """Render a real seismic inline section with optional fault probability overlay."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
 
-    data = _generate_synthetic_section(inline)
-    n_samples, n_crosslines = data.shape
+    il_arr, xl_arr, twtt_arr = _get_volume_coords()
+    xl_min   = int(xl_arr[0])
+    xl_max   = int(xl_arr[-1])
+    twt_max  = float(twtt_arr[-1])   # 1996.0 ms
+
+    # Load amplitude: (n_xl, n_s) -> transpose to (n_s, n_xl) for imshow
+    amp_slice = _get_amplitude_slice(inline)
+    section   = amp_slice.T  # (n_s, n_xl)
 
     fig, ax = plt.subplots(figsize=(9, 5.5), facecolor="#0d1520")
     ax.set_facecolor("#0d1520")
 
-    # Seismic wiggle/variable-density display
-    ax.imshow(
-        data,
+    im_amp = ax.imshow(
+        section,
         aspect="auto",
         cmap="RdBu_r",
-        vmin=-0.8,
-        vmax=0.8,
+        vmin=_AMP_VMIN,
+        vmax=_AMP_VMAX,
         interpolation="bilinear",
-        extent=[950, 1100, 4000, 0],  # XL range, TWT range
+        extent=[xl_min, xl_max, twt_max, 0.0],
+    )
+    fig.colorbar(
+        im_amp, ax=ax,
+        label="Amplitude (normalised)",
+        fraction=0.03, pad=0.02,
     )
 
+    bake_missing = False
     if show_overlay:
-        mask = _generate_fault_mask(inline)
-        fault_cmap = LinearSegmentedColormap.from_list(
-            "fault", ["#ff000000", "#ff6600cc", "#ffdd00ee"], N=256
-        )
-        ax.imshow(
-            mask,
-            aspect="auto",
-            cmap=fault_cmap,
-            vmin=0,
-            vmax=1,
-            alpha=0.55,
-            interpolation="bilinear",
-            extent=[950, 1100, 4000, 0],
-        )
+        prob_slice = _get_fault_prob_slice(inline)
+        if prob_slice is not None:
+            prob_disp = prob_slice.T  # (n_s, n_xl)
+            fault_cmap = LinearSegmentedColormap.from_list(
+                "fault", ["#ff000000", "#ff6600cc", "#ffdd00ee"], N=256
+            )
+            im_prob = ax.imshow(
+                prob_disp,
+                aspect="auto",
+                cmap=fault_cmap,
+                vmin=0,
+                vmax=1,
+                alpha=0.5,
+                interpolation="bilinear",
+                extent=[xl_min, xl_max, twt_max, 0.0],
+            )
+            fig.colorbar(
+                im_prob, ax=ax,
+                label="Fault probability (UNet3D)",
+                fraction=0.03, pad=0.08,
+            )
 
-    # Annotation: Hugin Fm approximate level
-    hugin_twt = 3500
-    ax.axhline(
-        y=hugin_twt,
-        color="#22c55e",
-        linewidth=1.2,
-        linestyle="--",
-        alpha=0.8,
-    )
-    ax.text(
-        1096, hugin_twt - 60, "Hugin Fm top (~3 500 ms)",
-        color="#22c55e", fontsize=8, ha="right", va="bottom", alpha=0.9,
-    )
+            # Fault stick overlay (interpretation vs ML — the killer feature)
+            sticks = _load_fault_sticks()
+            legend_added = False
+            for _name, stick_arr in sticks.items():
+                sel = stick_arr[:, 0] == float(inline)
+                if sel.any():
+                    ax.scatter(
+                        stick_arr[sel, 1],   # abs crossline
+                        stick_arr[sel, 2],   # twt_ms
+                        c="red", s=30, marker="o", zorder=6, alpha=0.9,
+                        label="Interpreted sticks (synthetic GT)" if not legend_added else None,
+                    )
+                    legend_added = True
+            if legend_added:
+                ax.legend(
+                    loc="lower right", fontsize=7,
+                    facecolor="#1a2535", labelcolor="#e2e8f0", edgecolor="#334155",
+                )
+        else:
+            bake_missing = True
 
-    # Draupne seal level
-    draupne_twt = 3380
-    ax.axhline(y=draupne_twt, color="#94a3b8", linewidth=0.8, linestyle=":", alpha=0.6)
-    ax.text(
-        1096, draupne_twt - 50, "Draupne Fm (seal)",
-        color="#94a3b8", fontsize=7.5, ha="right", va="bottom", alpha=0.7,
-    )
-
-    # Axes
     ax.set_xlabel("Crossline", color="#94a3b8", fontsize=9)
     ax.set_ylabel("Two-way time (ms)", color="#94a3b8", fontsize=9)
     ax.set_title(
-        f"Inline {inline}  —  Volve Survey A (synthetic placeholder)",
+        f"Inline {inline}  —  Volve Demo Volume (synthetic)",
         color="#e2e8f0",
         fontsize=10,
         pad=8,
@@ -254,10 +313,31 @@ def _render_seismic_section(inline: int, show_overlay: bool) -> None:
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
 
+    if bake_missing and show_overlay:
+        st.warning(
+            "Fault probability Zarr not found.  "
+            "Run `python scripts/bake_demo_faults.py` to pre-compute fault detections."
+        )
+
+    # Fault fraction readout
+    if show_overlay and not bake_missing:
+        prob_slice = _get_fault_prob_slice(inline)
+        if prob_slice is not None:
+            frac = float(np.mean(prob_slice >= fault_threshold))
+            st.caption(
+                f"Fault voxels in slice at threshold {fault_threshold:.2f}: "
+                f"{frac:.1%} of inline"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
+
+# Load inline bounds from real Zarr before rendering the slider
+_il_arr, _, _ = _get_volume_coords()
+_IL_MIN = int(_il_arr[0])    # 1001
+_IL_MAX = int(_il_arr[-1])   # 1100
 
 with st.sidebar:
     st.markdown("### 🌊 DeepSeismic Analyst")
@@ -299,20 +379,31 @@ with st.sidebar:
 
     st.divider()
 
-    # Inline selector for the viewer
+    # Inline selector — bounds from real Zarr coordinate array
     st.markdown('<p class="section-header">Seismic Viewer</p>', unsafe_allow_html=True)
     st.session_state.selected_inline = st.slider(
         "Inline number",
-        min_value=1000,
-        max_value=1200,
-        value=st.session_state.selected_inline,
-        step=5,
+        min_value=_IL_MIN,
+        max_value=_IL_MAX,
+        value=max(_IL_MIN, min(_IL_MAX, st.session_state.selected_inline)),
+        step=1,
         label_visibility="visible",
     )
     st.session_state.show_fault_overlay = st.checkbox(
         "Show fault probability overlay",
         value=st.session_state.show_fault_overlay,
     )
+    if st.session_state.show_fault_overlay:
+        st.session_state.fault_threshold = st.slider(
+            "Fault threshold",
+            min_value=0.3,
+            max_value=0.7,
+            value=st.session_state.fault_threshold,
+            step=0.05,
+            help="Probability cutoff for binary fault fraction readout.",
+        )
+
+    st.caption(f"Volume: 100 IL x 200 XL x 500 samp @ 4 ms  |  IL {_IL_MIN}–{_IL_MAX}")
 
     st.divider()
 
@@ -363,15 +454,17 @@ with col_viewer:
     _render_seismic_section(
         st.session_state.selected_inline,
         st.session_state.show_fault_overlay,
+        st.session_state.fault_threshold,
     )
-    if st.session_state.show_fault_overlay:
+    if st.session_state.show_fault_overlay and _ZARR_PROB.exists():
         st.caption(
-            "🟠 Fault probability overlay (UNet candidate — synthetic placeholder). "
-            "Requires analyst review."
+            "🟠 Fault probability overlay — UNet3D candidate detection. "
+            "Requires analyst review. Not a final interpretation."
         )
     st.caption(
-        "Seismic display is a synthetic placeholder for demo purposes. "
-        "Wire `get_inline_section` to real Zarr data for live rendering."
+        "Synthetic dataset approximating Volve ST10010 geometry — not licensed field data. "
+        "UNet3D trained on synthetic fault-stick-derived labels. "
+        "Metrics vs training labels only (circular validation — treat as training diagnostics)."
     )
 
 # ── Chat panel (left) ───────────────────────────────────────────────────────

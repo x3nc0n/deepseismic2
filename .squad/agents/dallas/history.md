@@ -10,7 +10,65 @@
 - **Key formats:** SEG-Y, numpy arrays (3D volumes), facies labels
 - **User:** jospaid
 
-## Learnings
+## Summary of Contributions
+
+### Core Infrastructure (Sprint 1, 2026-06-09)
+- **SEG-Y ingest pipeline** (`segy_loader.py`) — parses Volve ST10010 with segyio, exports to Zarr v3 + JSON metadata sidecar
+- **Fault label generation** (`label_generator.py`) — parses Petrel/OpendTect fault sticks, rasterizes to binary masks with configurable dilation
+- **Patch extraction** (`patches.py`) — 3D patches with spatial train/val/test splits (no random leakage), PyTorch Dataset interface
+- **UNet3D model** (`unet.py`) — configurable depth/features (~19M params default), checkpointing, inference engine
+- **Sliding-window inference** (`inference.py`) — Gaussian overlap-blending, batch GPU processing, Zarr output
+- **Training loop** (`train.py`) — AdamW + CosineAnnealingLR, BCEWithLogitsLoss, per-epoch validation, best-checkpoint saving
+- **Validation metrics** (`validation/__init__.py`) — Binary IoU, Dice, Precision, Recall, F1, distance-tolerant metrics, ASSD
+
+### Phase 1 Demo Viewer (2026-06-24T12:25:08)
+- Wired Streamlit viewer to real Zarr amplitude data (replacing synthetic placeholders)
+- Pre-baked fault detection results from checkpoint; Zarr file paths contracted
+- Resolved fault-stick coordinate mapping (z-as-sample-index, 4ms/sample)
+- Fixed zarr v2→v3 API bug in inference output writer
+- Model QC pass: probability range 0–1, mean 0.1258, fault fraction 3.89%
+
+### Phase 2 ADLS Infrastructure (2026-06-24T14:25:19 & 2026-06-24T23:29:56)
+- Extracted pure data-reader functions (`_data_readers.py`) — no Streamlit dependencies, testable in pytest
+- Implemented `ABSZarrV3Store` — proper zarr v3 async Store over Azure Blob Storage
+- Fixed 3 blocking bugs in storage layer: event-loop blocking on chunk reads, -0 suffix edge case, silent partial-write failure
+- Documented backend env-var contract (DEEPSEISMIC_DATA_BACKEND=local|azure)
+- Proved azure read path with dict-backed mock (no Azurite required)
+
+### ML Pipeline Fidelity Assessment (2026-06-24T18:09:14)
+- Confirmed real training loop exists but trains **synthetic-only data** (PatchDataset not wired)
+- Documented pipeline stage-by-stage comparison vs. DeepSeismic reference
+- Identified critical gaps: no experiment logging, no training seed, checkpoint metrics placeholder zeros
+- Recommended Sprint 2 fixes: wire real labels to training (~4h), add eval script (~2h)
+
+## Key Architectural Decisions
+
+**Zarr chunk shape (64, 64, 128):** Inline × crossline × sample. Asymmetry on sample axis reflects seismic data characteristics (many samples, query patterns). 2 MB per chunk fits Azure blob prefetch + SSD cache.
+
+**Spatial train/val/test splits (70/15/15 on inline axis):** Not random; prevents data leakage in spatially correlated volumes with overlapping patches. Industry standard for seismic ML.
+
+**3D UNet over 2D:** Faults are 3D surfaces; 3D context improves detection of oblique planes. Diverges from DeepSeismic (which emphasizes 2D) but well-motivated for fault detection.
+
+**BCEWithLogitsLoss + pos_weight=10:** Numerically stable (no sigmoid in loss). pos_weight=10 balances class imbalance (fault ~4% of voxels).
+
+**Gaussian-blended sliding-window inference:** Soft weighting at patch boundaries prevents discontinuities. Standard in medical imaging; transfers to seismic.
+
+## Learnings (Detailed Archive)
+
+See original detailed learnings (archived below) for:
+- Complete SEG-Y loader implementation details (context manager, SHA-256, temp cleanup)
+- Petrel fault-stick format parsing (4-column, 3-column, FAULT headers)
+- UNet configuration rationale (depth, features, VRAM budget)
+- Zarr compression strategy (LZ4 for float32, zstd+bitshuffle for uint8)
+- Viewer implementation (coordinate mapping, baked Zarr contract, model QC metrics)
+- Storage layer deep dive (ABSZarrV3Store, asyncio.to_thread, -0 slice edge case)
+- Phase 2 ADLS reader extraction and env-var contract
+
+*For full implementation details on any of these topics, refer to the archived learnings sections below.*
+
+---
+
+## ARCHIVED DETAILED LEARNINGS
 
 ### 2026-06-09 — Ingest pipeline + UNet implementation
 
@@ -229,4 +287,60 @@ This pattern applies to any suffix/tail slice: list, bytes, str, numpy array.
 **Test coverage (hudson-1):** Added `src/tests/test_viewer/test_data_readers.py` — 26 CI-safe tests using dict-backed mock ContainerClient (no Azurite). All tests pass; no bugs found in `_data_readers.py` or fixed `blob_client.py`.
 
 **Status:** CI green, PR #4 approved and ready to merge.
+
+## Learnings — 2026-06-24T18:09:14-05:00: ML Pipeline Fidelity Assessment
+
+### Task
+Evaluated how faithfully the deepseismic2 PoC emulates the microsoft/seismic-deeplearning (DeepSeismic) ML pipeline, stage by stage.
+
+### Key findings (summary)
+
+**The PoC DOES train a real model** — `src/deepseismic/training/train.py` contains a proper PyTorch training loop (AdamW, CosineAnnealingLR, BCEWithLogitsLoss with pos_weight, periodic checkpoints). Three checkpoints exist: `checkpoints/epoch_005.pt`, `epoch_010.pt`, `latest.pt`. However, **it trains exclusively on synthetic data** (Ricker wavelet + planar fault geometry generated in `generate_synthetic_training_data()`), not on real labeled seismic.
+
+**Pipeline stages present**: SEG-Y ingest (real), spatial train/val/test split (real, inline-axis 70/15/15), per-patch normalization (real), 3D patch extraction (real, zarr-backed), training loop (real but synthetic data), checkpointing (real), sliding-window inference with Gaussian blending (real), binary IoU/Dice/Precision/Recall metrics (real).
+
+**Pipeline stages missing or stubbed**:
+- `preprocessing/pipeline.py` is a stub — docstring only, no code.
+- No augmentation wired (transform slots exist but nothing passed).
+- No experiment logging (no TensorBoard, WandB, MLflow — only stdout prints).
+- No YACS/YAML config files — training config is a Python dataclass.
+- No global training seed (reproducibility limited to per-test `torch.manual_seed`).
+- No multi-class metrics (mIoU, per-class IoU, confusion matrices) — justified because ours is binary fault detection, not facies classification.
+- `validation/fault_continuity` and `throw_error_mean_ms` are hardcoded 0.0 (TODOs).
+
+**Architecture divergence**: Original emphasizes 2D section/patch deconvnet, SEResNet, HRNet. We have 3D UNet only. 3D is well-motivated for fault detection (faults are 3D surfaces, not 2D slices) but diverges from the benchmark model zoo.
+
+**Normalization**: We use per-patch z-score; original uses per-volume normalization from train-split statistics. Ours is operationally simpler and avoids needing a precomputed stats file; slight domain shift relative to reference.
+
+**Metrics gap**: We compute binary IoU/Dice — adequate for fault detection. Original computes multi-class mIoU/confusion matrices for facies — irrelevant to our task. We add geophysics-specific distance-tolerant metrics and ASSD not present in the original.
+
+### Critical gaps and minimal fixes
+
+1. **Synthetic-only training** (Critical): The biggest fidelity gap. Fix: wire `PatchDataset` (zarr-backed) into `train.py` when zarr data exists at the default path. `build_dataloaders()` in `patches.py` is already implemented; `train.py` just needs a path check to use it instead of `NumpyPatchDataset`.
+
+2. **No experiment logging** (Important): Add 10 lines of TensorBoard `SummaryWriter` to `train_epoch` / `validate` in `train.py`. Already no extra dependency needed (PyTorch ships TensorBoard integration).
+
+3. **No training seed** (Important): Add `torch.manual_seed(seed)` and `np.random.seed(seed)` at top of `train()`. One-liner.
+
+4. **No training config file** (Nice-to-have): Export `TrainConfig` to/from JSON in `train.py`. Already a dataclass — `dataclasses.asdict` + `json.dump` is 5 lines.
+
+5. **`preprocessing/pipeline.py` stub** (Nice-to-have): Implement the orchestration surface described in its docstring.
+
+### Checkpoint notes
+- Three real checkpoint files present (5.6 MB each, UNet3D depth=3/4 config).
+- Saved metrics at epoch 10: `iou=0.0, dice=0.0` — these are placeholder zeros from the training scaffold (metrics saved but not correctly propagated at save-time). Model produces non-trivial output (verified in Phase 1).
+
+## Scribe Consolidation — 2026-06-24T23:29:56Z
+
+ML pipeline fidelity assessment merged into `.squad/decisions.md` (Phase 2 Process Fidelity Evaluations section). ADLS viewer readers implementation also merged.
+
+**Key consolidated findings:**
+- Real PyTorch training loop exists but trains synthetic-only data (PatchDataset not wired)
+- Critical gaps: synthetic-only training, no experiment logging, no training reproducibility seed
+- Important gaps: no config serialization, preprocessing/pipeline.py stub, real-mode API path untested, single model architecture only
+- Nice-to-have: data augmentation, confusion matrix, throw/continuity validation TODOs
+
+Ripley's Sprint 2 recommendations include wiring real labels (4h), adding eval script (2h), fixing README (30min).
+
+ADLS reader extraction and zarr v3 async Store implementation documented for Phase 2 infrastructure.
 

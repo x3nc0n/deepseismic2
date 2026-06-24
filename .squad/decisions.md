@@ -786,4 +786,288 @@ Hudson was tasked to add CI-safe coverage for the highest-risk new code.
 
 **None.** Dallas's `_data_readers.py` and `blob_client.py` are clean. All assertions passed first time.
 
+---
+
+## Phase 2 Process Fidelity Evaluations (2026-06-24, Post-Demo)
+
+### Ash Advisory — Process Fidelity Assessment vs. DeepSeismic Reference
+
+**Date:** 2026-06-24T18:05:41.619-05:00
+**Author:** Ash (Geophysicist SME)
+**Status:** Advisory — findings for team review
+**Scope:** Geophysics-focused fidelity gap analysis of deepseismic2 PoC vs. microsoft/seismic-deeplearning
+
+#### Executive Summary
+
+The PoC emulates the *structural shape* of the DeepSeismic workflow (ingest → patch → train → infer → validate) but diverges from it on nearly every geophysically substantive dimension. The original project is a multi-class **facies segmentation** system trained on expert-interpreted labels from a production reference dataset (F3). Our PoC is a binary **fault detector** trained on procedurally generated synthetic data. We cannot claim to emulate the original interpretation process; we emulate its software scaffolding only.
+
+#### Key Findings
+
+1. **Data-Conditioning Fidelity:** Per-patch z-score normalization destroys amplitude information useful for fault characterization. No phase/polarity documentation or AGC removal. `preprocessing/pipeline.py` is an empty stub (8 lines of docstring, no code).
+
+2. **Label & Ground-Truth Fidelity:** Training uses 100% synthetic procedural geometry (single planar fault in Ricker-convolved volume with Gaussian noise). Circular validation guaranteed. Real Volve fault labels exist but unused in training. No facies interpretation available (original's primary task).
+
+3. **Dataset Substitution F3 → Volve:** Volve is a production field with well-constrained geology but very few public, pixel-complete interpretation labels. Substitution undermines claims of emulating the original's scientific process.
+
+4. **Metrics & Validation:** Validation module structurally better than original (tolerant metrics, ASSD), but evaluates synthetic vs. synthetic (circular) instead of model vs. independent interpretation.
+
+#### Prioritized Gaps
+
+**CRITICAL:**
+- **GAP-C1:** Training on synthetic geometry, not real interpreted data
+- **GAP-C2:** preprocessing/pipeline.py is empty stub
+- **GAP-C3:** Task mismatch — we do binary fault detection, original does multi-class facies
+
+**IMPORTANT:**
+- **GAP-I1:** No amplitude preservation in normalization
+- **GAP-I2:** No phase/polarity documentation or QC
+- **GAP-I3:** Validation against synthetic labels is circular
+- **GAP-I4:** Dataset provenance — training uses NumPy synthetic, not real Zarr
+
+**NICE-TO-HAVE:**
+- **GAP-N1:** No 2D section-mode inference
+- **GAP-N2:** No Fresnel zone / resolution assessment
+- **GAP-N3:** No fault throw estimation
+
+---
+
+### Dallas Decision — ML Pipeline Fidelity Assessment
+
+**Date:** 2026-06-24T18:09:14-05:00
+**Author:** Dallas (Data/ML Engineer)
+**Status:** Advisory — informs next sprint planning
+**Scope:** PoC ML pipeline vs. microsoft/seismic-deeplearning reference
+
+#### Key Finding: Synthetic-Only Training Loop
+
+Yes, there is actual training:
+- Full PyTorch loop: AdamW, CosineAnnealingLR, BCEWithLogitsLoss with pos_weight=10.0
+- Real checkpoints saved (5.6 MB each, epoch 5/10/latest)
+- Model produces non-trivial fault-probability output (3.89% fault voxel fraction)
+
+**However:** Trained only on synthetic data. `PatchDataset` (Zarr-backed, for real data) is **not connected to the training loop**. Falls back to `generate_synthetic_training_data()` — single planar fault with Ricker wavelets.
+
+#### Pipeline Stage Comparison
+
+| Stage | Gap | Status |
+|-------|-----|--------|
+| Patch extraction | 3D patches only; no 2D section mode | Partial |
+| Normalization | Per-patch z-score only; no global stats | Partial |
+| Train/val/test split | Spatial split by inline (correct) | Faithful |
+| Model architecture | 3D UNet only (justified for faults, not benchmarked) | Partial |
+| Loss function | BCEWithLogitsLoss (faithful intent) | Faithful |
+| Augmentation | Transform slots exist, nothing wired | Missing |
+| Experiment logging | Stdout only, no TensorBoard | Missing |
+| Reproducibility | No seed, no config file, no DAX | Missing |
+
+#### Prioritized ML Gaps
+
+**Critical:**
+- **1. Synthetic-only training** — `PatchDataset` + real zarr not wired to train loop
+- **2. No experiment logging** — cannot compare runs or track overfitting
+
+**Important:**
+- **3. No training reproducibility (seed)** — runs not reproducible
+- **4. Checkpoint metrics placeholder zeros** — `val_metrics["iou"]` not properly aggregated at save time
+
+**Nice-to-have:**
+- **5. Training config serialization** — `TrainConfig` dataclass not persisted to JSON
+- **6. Data augmentation** — random flips/rotations not wired
+- **7. preprocessing/pipeline.py stub** — empty implementation
+- **8. Confusion matrix** — not computed
+
+---
+
+### Ripley Decision — Process Emulation Gap Assessment
+
+**Date:** 2026-06-24T18:05:41-05:00
+**Author:** Ripley (Lead/Architect)
+**Scope:** End-to-end workflow fidelity vs. microsoft/seismic-deeplearning reference
+
+#### Workflow Stage Audit
+
+| Stage | Original | Our PoC | Verdict |
+|-------|----------|---------|---------|
+| Data acquisition | F3 Netherlands / Penobscot real public surveys with labels | Volve open dataset; training data **programmatically synthesized** | Partial |
+| Ingest | Numpy `.npy` pre-prepared | Full SEG-Y → Zarr + metadata sidecars | Faithful+ |
+| Preprocessing | Config-driven normalization, spatial cropping | Zarr-native PatchDataset with spatial splits | Faithful |
+| Label preparation | Real human-annotated facies/fault labels | **Synthetic toy geometry** (single planar fault); real labels parsed but unused | Mocked |
+| Train | Full training scripts, multi-model, WandB | Single UNet3D on **synthetic toy data** (96×128×128), 10 epochs, no tracking | Partial |
+| Infer | Held-out volume sliding window | Gaussian-blended sliding window, Zarr I/O, batch GPU | Faithful |
+| Evaluate | IoU, pixel accuracy, confusion matrix on held-out | Functions exist (IoU, Dice, ASSD, distance-tolerant); **never called** in any pipeline | Partial |
+| Publish/serve | N/A (original has no API) | FastAPI 13 endpoints, storage layer; **all in mock mode by default** | Added (with caveats) |
+
+#### Real vs. Mock/Baked/Synthetic Audit
+
+**Real:**
+- SEG-Y loader (parses real Volve ST10010)
+- Zarr export + chunking (valid v3 stores)
+- Fault stick parser (Petrel/OpendTect format)
+- UNet3D architecture (standard, tested)
+- Sliding-window inference (works)
+- Validation metrics (functions exist and compute)
+
+**Mock/Baked/Synthetic:**
+- Training data (`generate_synthetic_training_data()` creates 96×128×128 toy volume)
+- Checkpoint (trained 10 epochs on synthetic; metrics placeholders `iou=0.0, dice=0.0`)
+- Baked demo faults (pre-computed `fault_prob.zarr` + `fault_mask.zarr`, offline)
+- API mock mode (all 13 endpoints hardcoded when `DEEPSEISMIC_MOCK_MODE=true`, documented default)
+- Agent mock mode (all 11 tools canned responses when `MOCK_LLM=true`, documented default)
+- Label generator (sophisticated code, **never wired to training**)
+- Validation loop (**never invoked**; no script calls `evaluate_model()`)
+
+#### README Claim Assessment
+
+> "Sprint 1 complete. Full end-to-end pipeline implemented."
+
+**Verdict: MISLEADING.** Code-exists level accurate — every stage has code. But pipeline never run end-to-end on real data with real labels. Actual pipeline: synthetic data → toy training → baked inference → mock API → mock agent. **Should say:** "full end-to-end pipeline scaffolded; demonstrated on synthetic data."
+
+#### Scope Honesty
+
+**We are not emulating the original's process. We have built a demo that LOOKS like the process.**
+
+The original seismic-deeplearning delivers: *give it real dataset (F3/Penobscot) with real labels → run config → get trained model → evaluate with standard metrics → report IoU/accuracy.* Reproducible science.
+
+DeepSeismic2 delivers: *impressive API/agent/UI chrome wrapped around a model trained on one synthetic planar fault.* Model output "visually plausible" but no demonstrated relationship to real geology. Evaluation framework exists but never exercised.
+
+**Gap between narrative and reality:**
+- Narrative: "cloud-native modernization of seismic interpretation"
+- Reality: "cloud-native serving and agent layer over a placeholder ML core"
+
+#### Consolidated Prioritized Gap List
+
+**CRITICAL (must fix to claim "emulates the process")**
+
+| Gap | Owner | File(s) |
+|-----|-------|---------|
+| **C1: Training uses only synthetic data** — model never trained on real seismic with real fault labels. label_generator.py + Volve .dat sticks exist but unwired to training path. | Dallas (ML) | `training/train.py`, `ingest/label_generator.py` |
+| **C2: No validation pass** — `evaluate_model()` exists but never called. No automated script produces metrics. Cannot verify model quality. | Dallas (ML) | `validation/__init__.py` |
+| **C3: README overstates** — "full end-to-end pipeline" implies real data flows through. Should qualify with "synthetic/demo data." | Ripley | `README.md` |
+
+**IMPORTANT (needed for credible PoC)**
+
+| Gap | Owner | File(s) |
+|-----|-------|---------|
+| **I1: No config/experiment system** — original uses YAML configs. Our training hardcoded. | Dallas (ML) | `training/train.py` |
+| **I2: Preprocessing pipeline is empty** — `pipeline.py` stub (no normalization/QC between ingest and training). | Ash (geophysics) | `preprocessing/pipeline.py` |
+| **I3: Real-mode API path untested** — `_run_fault_detection()` has real-mode code but no integration test. Unknown if works end-to-end. | Dallas (ML) | `api/routes/interpretation.py:117-198` |
+| **I4: Single model architecture** — original offers UNet/SEResNet/HRNet/DeepLab. We have only UNet3D. (Acceptable for PoC.) | Dallas (ML) | `models/` |
+| **I5: Checkpoint metrics placeholder zeros** — saved as 0.0. Even with synthetic, training loop should populate real IoU/Dice. | Dallas (ML) | `training/train.py:388-393` |
+
+**NICE-TO-HAVE (polish for credibility)**
+
+| Gap | Owner | File(s) |
+|-----|-------|---------|
+| **N1: No experiment tracking** (WandB/MLflow) — architecture diagram shows AzureML. | Dallas (ML) | — |
+| **N2: No data augmentation** — seismic volumes benefit from flip/rotate/noise during training. | Ash (geophysics) | `preprocessing/patches.py` |
+| **N3: Distance-tolerant validation TODO** — `fault_continuity` and `throw_error_mean_ms` hardcoded to 0.0 with TODO comments. | Ash (geophysics) | `validation/__init__.py:350-351` |
+
+#### Recommended Next Sprint: Minimum Viable Set
+
+1. **Wire real labels into training** (Dallas, ~4h)
+   - Use existing `label_generator.py` to produce fault mask from Volve `.dat` sticks.
+   - Store at `data/volve/staged/fault_mask_real.zarr`.
+   - Train UNet3D on real Volve amplitude + real fault mask.
+   - Save checkpoint with real metrics.
+
+2. **Add evaluation script** (Dallas, ~2h)
+   - `scripts/evaluate.py` — loads checkpoint, runs inference on test split, calls `evaluate_model()`, prints metrics summary.
+   - One command: `python scripts/evaluate.py --checkpoint checkpoints/best.pt`
+
+3. **Fix README honesty** (Ripley, ~30min)
+   - Qualify "full end-to-end pipeline" with current data status.
+   - Add "Maturity" section: what's real, what's demo/synthetic, what's planned.
+   - Add "Reproducibility" section: how to retrain from real data.
+
+#### Summary
+
+PoC architecturally impressive — API/agent/UI layer beyond original. ML core (thing that actually interprets seismic data) running on synthetic toy data with no validation. Original's core value was *reproducible ML experimentation on real data with real metrics*. We've replicated code scaffolding, not substance.
+
+**Three changes close the gap:** real training labels, evaluation script, honest README claims. Everything else either unwired code or deferrable.
+
+---
+
+### Dallas Decision — ADLS Viewer Readers — Option B Implementation
+
+**Date:** 2026-06-24T14:25:19-05:00
+**Author:** Dallas (Data/ML Engineer)
+**Status:** Implemented — branch `feat/adls-viewer-readers`, pending Hudson CI + PR
+
+#### Context
+
+Phase 1 (PR #3) wired Streamlit viewer to read amplitude + baked fault Zarr from **local file paths**. For hosted Azure Container Apps demo, artifacts live in ADLS Gen2. Infra issue Spava-Corp/deepseismic2-infra#8 chose **Option B**: app reads artifacts **directly from ADLS** (no sidecar download, no volume mount).
+
+#### Decisions
+
+**1. Reader extraction into `_data_readers.py`**
+
+All pure data-access logic extracted from `streamlit_app.py` into `src/deepseismic/ui/_data_readers.py` — no Streamlit imports, no `@st.cache_data`, no sidebar side-effects. `streamlit_app.py` now contains thin `@st.cache_data` wrappers delegating to pure functions. Lets Hudson write proper unit tests without mocking Streamlit.
+
+**2. Backend env-var contract**
+
+```
+# Backend selector
+DEEPSEISMIC_DATA_BACKEND         local | azure   (default: local)
+
+# Local backend
+DEEPSEISMIC_DATA_DIR             path to volve data dir (default: data/volve in repo)
+
+# Azure backend — artifact locations
+DEEPSEISMIC_AMP_CONTAINER        default: staged
+DEEPSEISMIC_AMP_PREFIX           default: volve/synthetic.zarr
+DEEPSEISMIC_FAULT_PROB_CONTAINER default: results
+DEEPSEISMIC_FAULT_PROB_PREFIX    default: volve/fault_prob.zarr
+DEEPSEISMIC_FAULT_MASK_CONTAINER default: results
+DEEPSEISMIC_FAULT_MASK_PREFIX    default: volve/fault_mask.zarr
+DEEPSEISMIC_STICKS_CONTAINER     default: raw
+DEEPSEISMIC_STICKS_PREFIX        default: volve/interpretations/fault_sticks
+
+# StorageClient auth (existing convention, unchanged)
+STORAGE_CONNECTION_STRING        Azurite or real account connection string
+AZURE_STORAGE_ACCOUNT            Account name (uses DefaultAzureCredential in cloud)
+STORAGE_ACCOUNT_NAME             Alias for AZURE_STORAGE_ACCOUNT
+```
+
+**3. Zarr v3 store compatibility fix**
+
+`ABSZarrStore` (MutableMapping) incompatible with zarr v3. `zarr.open_group(store=MutableMapping)` raises `TypeError`. Added `ABSZarrV3Store(zarr.abc.store.Store)` — proper zarr v3 async Store subclass — to `blob_client.py`.
+
+Key design choices:
+- Blocking Azure SDK calls via `asyncio.to_thread` (zarr v3 is async).
+- `get()` wraps raw bytes as `prototype.buffer.from_bytes(raw)`.
+- `with_read_only()` implemented (required by zarr for `mode="r"`).
+- `ABSZarrStore` (MutableMapping) retained for backward compat.
+- `upload_zarr_store` rewritten to walk local directory and upload files directly.
+- `open_zarr_store` now returns `ABSZarrV3Store`.
+
+**4. Fault sticks in azure backend**
+
+`.dat` files are small text blobs. Azure reader calls `list_blobs(container, prefix)` → `download_blob(container, name)` for each `.dat`, then parses bytes with unchanged canonical coordinate mapping:
+```
+abs_inline    = 1001 + il_idx
+abs_crossline = 1900 + xl_idx
+twt_ms        = z_sample * 4.0
+```
+Failure (missing container/prefix) returns `{}` gracefully — viewer omits sticks rather than crashing.
+
+**5. Graceful degradation preserved**
+
+Both backends: if fault_prob artifact is absent → `get_fault_prob_slice()` returns `None` → viewer renders amplitude-only with warning.
+
+#### Validation
+
+- `ruff check src/ scripts/` → clean
+- `python -m pytest -m "not integration" -q` → 129 passed, 2 skipped
+- `python -m py_compile src/deepseismic/ui/_data_readers.py src/deepseismic/ui/streamlit_app.py` → OK
+- Azure read path proved with dict-backed mock ContainerClient: write 10×20×50 float32 volume to mock ABS, read back via `zarr.open_group(ABSZarrV3Store, mode='r')`, all allclose assertions passed.
+
+#### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/deepseismic/ui/_data_readers.py` | **New** — pure backend-aware data readers |
+| `src/deepseismic/ui/streamlit_app.py` | Thin `@st.cache_data` wrappers; imports from `_data_readers` |
+| `src/deepseismic/storage/blob_client.py` | Added `ABSZarrV3Store`, updated `upload_zarr_store` + `open_zarr_store` |
+| `src/tests/test_viewer/test_viewer.py` | Updated array-name string guards to also check `_data_readers.py` |
+
 

@@ -63,3 +63,47 @@ Sprint 1 coordination complete. All agents delivered successfully.
 - 5 agents synchronized
 - 7 decision documents archived
 - Full team context available in decisions.md
+
+## Learnings — 2026-06-24T18:05:41-05:00: Process Emulation Gap Assessment
+
+### Key findings
+
+1. **The ML core is hollow.** Training runs only on programmatically-generated synthetic data (one planar fault in a 96×128×128 toy volume). The model has never seen real geology. `checkpoints/latest.pt` has placeholder metrics (IoU=0.0, Dice=0.0).
+
+2. **Label pipeline exists but is unwired.** `label_generator.py` correctly parses Volve fault sticks and rasterises them. But the training module (`train.py`) never calls it — it generates its own synthetic data instead.
+
+3. **Validation code exists but is never exercised.** `validation/__init__.py` implements IoU, Dice, ASSD, distance-tolerant metrics. No script or pipeline ever invokes `evaluate_model()`.
+
+4. **Default demo is 100% mock.** README tells users to set `DEEPSEISMIC_MOCK_MODE=true` and `MOCK_LLM=true`. Both API and agent return canned data. The Streamlit viewer shows pre-baked inference results.
+
+5. **README "full end-to-end pipeline" claim is misleading.** Code exists at every stage, but the pipeline has never run end-to-end on real data with real labels and real evaluation.
+
+6. **What IS real and good:** SEG-Y ingest, Zarr conversion, UNet3D architecture, sliding-window inference engine, patch extraction with spatial splits, API contract design, agent tool wiring. The serving/consumption layer exceeds the original.
+
+### Critical gaps (3)
+- C1: Training on synthetic-only data
+- C2: No validation pass
+- C3: README overstates maturity
+
+### Minimum fix set for Sprint 2
+- Wire real Volve fault labels into training path
+- Add `scripts/evaluate.py` that calls `evaluate_model()`
+- Qualify README claims with honest maturity section
+
+### Decision
+Full gap list written to `.squad/decisions/inbox/ripley-process-emulation-gaps.md`.
+
+## Scribe Consolidation — 2026-06-24T23:29:56Z
+
+Process emulation gap assessment merged into `.squad/decisions.md` (Phase 2 Process Fidelity Evaluations section). Consolidated findings from Ash (geophysics gaps), Dallas (ML pipeline gaps), and Ripley (architecture audit).
+
+**Consolidated verdict:** README "full end-to-end pipeline" claim is MISLEADING. Actual pipeline: synthetic → toy training → baked inference → mock API → mock agent. Should state "pipeline scaffolded; demonstrated on synthetic data."
+
+**Critical gaps (3):** C1 (synthetic-only training), C2 (no validation pass), C3 (README overstates).
+
+**Important gaps (5):** I1 (no config system), I2 (preprocessing stub), I3 (real-mode API untested), I4 (single model), I5 (placeholder metrics).
+
+**Sprint 2 minimum viable:** Wire real labels (~4h Dallas), eval script (~2h Dallas), README fix (~30min Ripley). Stretch: YAML config (~3h Dallas), fill pipeline.py (~2h Ash).
+
+**What IS real and good:** SEG-Y ingest, Zarr export, UNet3D, sliding-window inference, patch extraction with spatial splits, API contract design, agent tool wiring. Serving/consumption layer exceeds original.
+

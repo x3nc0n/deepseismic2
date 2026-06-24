@@ -615,4 +615,175 @@ origin lists are more secure and still cover both local UI dev servers.
 - Pagination for large survey/well lists (add `skip`/`limit` when catalog grows)
 - Authentication / API key middleware (add before any external exposure)
 
+## Phase 2 — ADLS Viewer Backend, Option B (2026-06-24)
+
+### Dallas Decision — ADLS Viewer Readers — Option B Implementation
+
+**Date:** 2026-06-24T14:25:19-05:00
+**Author:** Dallas (Data/ML Engineer)
+**Status:** Implemented — branch `feat/adls-viewer-readers`, pending Hudson CI + PR
+**Commit:** b2b2b58 (+ docs 25b588e)
+
+#### Context
+
+Phase 1 (PR #3) wired the Streamlit viewer to read amplitude + baked fault Zarr from
+**local file paths**.  For the hosted Azure Container Apps demo, those artifacts live
+in ADLS Gen2.  Infra issue Spava-Corp/deepseismic2-infra#8 chose **Option B**: the
+app reads artifacts **directly from ADLS** (no sidecar download, no volume mount).
+
+#### Key Decisions
+
+1. **Reader extraction into `_data_readers.py`**: All pure data-access logic extracted from `streamlit_app.py` into `src/deepseismic/ui/_data_readers.py` — no Streamlit imports, no `@st.cache_data`, no sidebar side-effects. `streamlit_app.py` now contains thin `@st.cache_data` wrappers that delegate to the pure functions.
+
+2. **Backend env-var contract** (relay verbatim to infra issue #8):
+   - `DEEPSEISMIC_DATA_BACKEND`: local | azure (default: local)
+   - `DEEPSEISMIC_DATA_DIR`: path to volve data dir (default: data/volve in repo)
+   - `DEEPSEISMIC_AMP_CONTAINER`, `DEEPSEISMIC_AMP_PREFIX`: artifact locations (defaults: staged, volve/synthetic.zarr)
+   - `DEEPSEISMIC_FAULT_PROB_CONTAINER`, `DEEPSEISMIC_FAULT_PROB_PREFIX`: (defaults: results, volve/fault_prob.zarr)
+   - `DEEPSEISMIC_FAULT_MASK_CONTAINER`, `DEEPSEISMIC_FAULT_MASK_PREFIX`: (defaults: results, volve/fault_mask.zarr)
+   - `DEEPSEISMIC_STICKS_CONTAINER`, `DEEPSEISMIC_STICKS_PREFIX`: (defaults: raw, volve/interpretations/fault_sticks)
+   - `STORAGE_CONNECTION_STRING`, `AZURE_STORAGE_ACCOUNT`: StorageClient auth (existing convention)
+
+3. **zarr v3 store compatibility fix**: `ABSZarrStore` (a `MutableMapping`) is incompatible with zarr v3. Added `ABSZarrV3Store(zarr.abc.store.Store)` — a proper zarr v3 async Store subclass — to `blob_client.py`. Blocking Azure SDK calls dispatched via `asyncio.to_thread` (zarr v3 is async). `get()` wraps raw bytes as `prototype.buffer.from_bytes(raw)`. `with_read_only()` implemented for read mode.
+
+4. **Fault sticks in azure backend**: `.dat` files are small text blobs. Azure reader calls `list_blobs(container, prefix)` → `download_blob(container, name)` for each `.dat`, then parses bytes with unchanged canonical coordinate mapping. Failure (missing container/prefix) returns `{}` gracefully.
+
+5. **Graceful degradation preserved**: Both backends: if fault_prob artifact is absent → `get_fault_prob_slice()` returns `None` → viewer renders amplitude-only with a warning.
+
+#### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/deepseismic/ui/_data_readers.py` | **New** — pure backend-aware data readers |
+| `src/deepseismic/ui/streamlit_app.py` | Thin `@st.cache_data` wrappers; imports from `_data_readers` |
+| `src/deepseismic/storage/blob_client.py` | Added `ABSZarrV3Store`, updated `upload_zarr_store` + `open_zarr_store` |
+| `src/tests/test_viewer/test_viewer.py` | Updated array-name string guards to also check `_data_readers.py` |
+
+---
+
+### Dallas Decision — ABSZarrV3Store Code-Review Bug Fixes
+
+**Date:** 2026-06-11
+**Author:** Dallas
+**Branch:** feat/adls-viewer-readers
+**Commit:** b2b2b58
+
+#### Context
+
+A code review of `ABSZarrV3Store` in `src/deepseismic/storage/blob_client.py` identified three bugs of varying severity. All three were fixed in commit b2b2b58.
+
+#### Bug 1 (CRITICAL) — Event loop blocked on every chunk read
+
+**Location:** `ABSZarrV3Store.get()`
+
+**Root cause:** `asyncio.to_thread(blob_client.download_blob().readall)` evaluates `blob_client.download_blob()` — a blocking HTTP call — on the event-loop thread *before* `to_thread` dispatches anything. Only the already-returned `.readall` callable is deferred, not the network round-trip. This serialises all concurrent zarr chunk fetches behind blocking I/O on the main thread.
+
+**Fix:**
+```python
+# Before (buggy)
+raw: bytes = await asyncio.to_thread(blob_client.download_blob().readall)
+
+# After (correct)
+raw: bytes = await asyncio.to_thread(lambda: blob_client.download_blob().readall())
+```
+
+**Impact:** Without this fix, multi-chunk parallel reads (`get_partial_values`) offer zero concurrency benefit — all downloads queue behind each other on the event loop.
+
+#### Bug 2 (HIGH) — `SuffixByteRequest(0)` returns the entire blob
+
+**Location:** `_apply_byte_range()`, `SuffixByteRequest` branch
+
+**Root cause:** Python `-0 == 0`, so `data[-0:]` equals `data[0:]` — the full byte sequence. A suffix of zero should logically return no bytes, but the unguarded slice silently returned all bytes, corrupting callers that request an empty suffix tail.
+
+**Fix:**
+```python
+# Before (buggy)
+if isinstance(byte_range, SuffixByteRequest):
+    return data[-byte_range.suffix :]
+
+# After (correct)
+if isinstance(byte_range, SuffixByteRequest):
+    if byte_range.suffix == 0:
+        return b""
+    return data[-byte_range.suffix :]
+```
+
+**Regression test added:** `TestApplyByteRange.test_suffix_zero_returns_empty` in `src/tests/test_viewer/test_data_readers.py`.
+
+#### Bug 3 (MEDIUM) — `set()` silently ignores `byte_range` (partial write)
+
+**Location:** `ABSZarrV3Store.set()`
+
+**Root cause:** The method signature accepted `byte_range: tuple[int, int] | None = None` but never used it. A caller requesting a partial write would receive a full-blob overwrite with no error. `ABSZarrV3Store` does not advertise `supports_partial_writes = True`, so partial-write calls should be rejected loudly.
+
+**Fix:**
+```python
+async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    self._check_writable()
+    if byte_range is not None:
+        raise NotImplementedError("ABSZarrV3Store does not support partial writes")
+    ...
+```
+
+#### Validation
+
+- `ruff check src/` — clean (0 errors)
+- `pytest -m "not integration" -q` — **156 passed, 2 skipped, 6 deselected** (up from 155)
+
+---
+
+### Hudson Decision — ADLS Viewer Test Strategy (Phase 2)
+
+**Date:** 2026-06-24T15:03:33-05:00
+**Author:** Hudson (Tester / QA Engineer)
+**Branch:** `feat/adls-viewer-readers`
+**Status:** Implemented — 26 new CI-safe tests committed + pushed
+**Commit:** 18494f9
+
+#### Context
+
+Dallas delivered Phase 2 ADLS Option B with:
+- `src/deepseismic/ui/_data_readers.py` — pure backend-aware readers (azure/local)
+- `src/deepseismic/storage/blob_client.py` — `ABSZarrV3Store` zarr v3 async Store over ABS
+- `streamlit_app.py` — thin `@st.cache_data` wrappers delegating to `_data_readers`
+
+Hudson was tasked to add CI-safe coverage for the highest-risk new code.
+
+#### Test Strategy Decisions
+
+1. **Dict-backed mock ContainerClient (no Azurite required)**: `ABSZarrV3Store` round-trip tests use `_MockContainerClient` / `_MockBlobClient` — a plain `dict[str, bytes]` backing store. `download_blob()` raises `azure.core.exceptions.ResourceNotFoundError` (not `FileNotFoundError`) because `ABSZarrV3Store.get()` catches `ResourceNotFoundError` specifically.
+
+2. **Azure backend resolver via monkeypatch.setattr + monkeypatch.setenv**: Rather than patching at class level (`StorageClient.__init__`), patch the `_storage_client` factory function in `_data_readers` directly. `_MockStorageClient` implements `open_zarr_store`, `list_blobs`, and `download_blob` — covering both the zarr path (amplitude/fault_prob) and the blob-download path (fault sticks).
+
+3. **Local backend: skipif on missing paths (consistent with Phase 1 pattern)**: `TestBackendResolverLocalPresent` is class-level `@pytest.mark.skipif(not _ZARR_AMP.exists(), ...)`. `TestBackendResolverLocalMissing` uses `monkeypatch.setenv("DEEPSEISMIC_DATA_DIR", nonexistent)` to test graceful degradation without needing any real files — runs in CI.
+
+4. **Fault-stick coordinate mapping guarded on azure path too**: `TestAzureFaultSticksAzure` uses the same synthetic `.dat` fixture content as the Phase 1 `TestFaultStickCoordinateMapping` (8 tests, synth fixture). Both local and azure paths now have the TWT ≥ 800 ms guard and the pinned first-row exact mapping.
+
+5. **Integration test: @pytest.mark.integration, never runs in CI**: `TestAzuriteIntegration` documents the real Azurite path (`upload_zarr_store` → `open_zarr_store` allclose). CI runs `pytest -m "not integration"` which deselects it.
+
+#### Test File
+
+`src/tests/test_viewer/test_data_readers.py` — 8 classes, 26 + 1 deselected tests:
+
+| Class | Tests | CI-safe? |
+|-------|-------|----------|
+| `TestApplyByteRange` | 4 | ✓ |
+| `TestABSZarrV3StoreRoundTrip` | 6 | ✓ |
+| `TestBackendResolverDefaults` | 3 | ✓ |
+| `TestBackendResolverLocalMissing` | 1 | ✓ |
+| `TestBackendResolverLocalPresent` | 3 | skipif on real data |
+| `TestBackendResolverAzure` | 4 | ✓ |
+| `TestAzureFaultSticksAzure` | 5 | ✓ |
+| `TestAzuriteIntegration` | 1 | @pytest.mark.integration |
+
+#### Validation
+
+- `python -m pytest -m "not integration" -q` → **155 passed, 2 skipped, 6 deselected** ✓
+- `ruff check src/` → **All checks passed** ✓
+- Pushed: commit `18494f9` on `feat/adls-viewer-readers`
+
+#### Bugs Found
+
+**None.** Dallas's `_data_readers.py` and `blob_client.py` are clean. All assertions passed first time.
+
 

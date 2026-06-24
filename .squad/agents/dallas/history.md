@@ -209,3 +209,24 @@ return data[-n:]
 
 This pattern applies to any suffix/tail slice: list, bytes, str, numpy array.
 
+### 2026-06-24 — Phase 2: ADLS Viewer Backend (Option B) + Bug Fixes
+
+**PR #4 (feat/adls-viewer-readers):** Implemented Option B ADLS viewer backend — app reads artifacts directly from ADLS Gen2 with pure data-reader extraction and zarr v3 async store compatibility.
+
+**Key decisions:**
+1. Extracted all data-access logic into `src/deepseismic/ui/_data_readers.py` (pure functions, no Streamlit imports) so Hudson could write proper unit tests without mocking Streamlit.
+2. Added `ABSZarrV3Store(zarr.abc.store.Store)` — proper zarr v3 async Store over Azure Blob Storage — to `blob_client.py`.
+3. Implemented graceful degradation: missing fault_prob artifact returns `None`, viewer renders amplitude-only with warning.
+4. Backend env-var contract (DEEPSEISMIC_DATA_BACKEND=local|azure) relayed to infra issue #8 (comment 4793304744).
+
+**Code review (review-storage):** Found 3 blocking bugs in `ABSZarrV3Store`:
+- **Critical:** Event loop blocked on every chunk read (`asyncio.to_thread` evaluates blocking call on main thread before deferred execution). Fixed by wrapping in lambda: `await asyncio.to_thread(lambda: blob_client.download_blob().readall())`.
+- **High:** `SuffixByteRequest(0)` returns entire blob (Python `-0 == 0` quirk). Fixed by guarding: `if suffix == 0: return b""`.
+- **Medium:** `set()` accepts `byte_range` parameter but ignores it (silent failure). Fixed by raising `NotImplementedError("ABSZarrV3Store does not support partial writes")`.
+
+**Fix commit:** b2b2b58 (+ docs 25b588e). Validation: ruff clean, 156 tests passed.
+
+**Test coverage (hudson-1):** Added `src/tests/test_viewer/test_data_readers.py` — 26 CI-safe tests using dict-backed mock ContainerClient (no Azurite). All tests pass; no bugs found in `_data_readers.py` or fixed `blob_client.py`.
+
+**Status:** CI green, PR #4 approved and ready to merge.
+

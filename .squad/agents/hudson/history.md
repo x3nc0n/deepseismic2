@@ -10,6 +10,28 @@
 
 ## Learnings
 
+### 2026-06-24 — CI-Safe Viewer Tests (PR #3 Fix)
+
+**Session:** Fixed 11 CI failures + 7 errors caused by gitignored data artifacts absent on CI runner.
+
+**CI-vs-local data-availability gotcha:**
+Tests that read from `data/volve/staged/` or `data/volve/interpretations/fault_sticks/` pass locally because the files exist on disk but fail in CI because they are gitignored (large binaries). The test suite must never hard-depend on gitignored artifacts for tests that run in standard CI mode.
+
+**Fixture-synthesis pattern for the coordinate guard:**
+`TestFaultStickCoordinateMapping` — the highest-value regression guard (z-as-sample-index bug) — was refactored to use a synthesized `.dat` fixture written to a `tmp_path_factory` temp dir. Three rows per fault file are sufficient to cover the full pinned coordinate ranges (min/max inline, crossline, z_samp). The regression math (`z_samp × 4.0 == twt_ms`) is fully proven on synthetic data. Pattern: parameterize the helper with `sticks_dir: Path = _STICKS_DIR` and inject `synth_sticks_dir` from the test fixture.
+
+**skipif-on-missing-path pattern:**
+For tests that genuinely need real baked zarr volumes (`TestAmplitudeReader`, `TestFaultProbReader`), use class-level `@pytest.mark.skipif(not _PATH.exists(), reason="...")`. This: (a) is self-documenting about why CI skips, (b) still runs locally where data exists, (c) fixes the inverted-guard bug where tests asserted `arr is not None` (saying "file exists but reader returned None") when in CI the file simply didn't exist — with skipif, those classes only execute when the file is confirmed present.
+
+**No filename mismatch found:**
+`bake_demo_faults.py`, `streamlit_app.py`, and `test_viewer.py` all consistently reference `fault_prob.zarr` / `fault_probability` array. The task brief's mention of `synthetic_fault_prob.zarr` was a red herring — not present anywhere in the codebase.
+
+**Verification results (2026-06-24):**
+- `pytest src/tests/test_viewer/ -m "not integration" -v`: 29 passed, 0 failed, 0 errors ✓
+- `pytest -m "not integration" -q`: 129 passed, 2 skipped, 5 deselected, 0 failures ✓
+- `ruff check src/`: All checks passed ✓
+- Pushed: `dab69c8` on `feat/real-fault-viewer`
+
 ### 2026-06-09 — Test Harness Setup
 
 **Session:** Wrote full smoke test suite for all PoC modules.

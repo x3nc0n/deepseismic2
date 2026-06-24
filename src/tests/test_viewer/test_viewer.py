@@ -415,15 +415,29 @@ class TestViewerModuleRegression:
         assert not missing, f"Functions missing from streamlit_app.py: {sorted(missing)}"
 
     def test_amplitude_reader_uses_correct_array_name(self, app_ast: ast.Module):
-        """_get_amplitude_slice must index root['amplitude'], not 'amp' or other alias."""
+        """_get_amplitude_slice must index root['amplitude'], not 'amp' or other alias.
+
+        After refactoring to _data_readers.py, the string may live there instead.
+        """
         source = self._APP_PATH.read_text(encoding="utf-8")
-        assert '"amplitude"' in source or "'amplitude'" in source, (
-            "String 'amplitude' not found in streamlit_app.py — array name may have changed"
+        readers_path = self._APP_PATH.parent / "_data_readers.py"
+        readers_source = readers_path.read_text(encoding="utf-8") if readers_path.exists() else ""
+        combined = source + readers_source
+        assert '"amplitude"' in combined or "'amplitude'" in combined, (
+            "String 'amplitude' not found in streamlit_app.py or _data_readers.py"
+            " — array name may have changed"
         )
 
     def test_fault_prob_uses_correct_array_name(self, app_ast: ast.Module):
-        """_get_fault_prob_slice must index root['fault_probability'] (not 'fault_prob')."""
+        """_get_fault_prob_slice must index root['fault_probability'] (not 'fault_prob').
+
+        After refactoring to _data_readers.py, the string may live there instead.
+        """
         source = self._APP_PATH.read_text(encoding="utf-8")
-        assert '"fault_probability"' in source or "'fault_probability'" in source, (
-            "String 'fault_probability' not found — array name contract may be broken"
+        readers_path = self._APP_PATH.parent / "_data_readers.py"
+        readers_source = readers_path.read_text(encoding="utf-8") if readers_path.exists() else ""
+        combined = source + readers_source
+        assert '"fault_probability"' in combined or "'fault_probability'" in combined, (
+            "String 'fault_probability' not found in streamlit_app.py or _data_readers.py"
+            " — array name contract may be broken"
         )

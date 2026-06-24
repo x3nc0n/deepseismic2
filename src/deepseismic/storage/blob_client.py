@@ -14,16 +14,26 @@ Container conventions (architecture decision):
 
 from __future__ import annotations
 
+import asyncio
 import base64 as _b64
 import io
 import os
-from collections.abc import Iterator, MutableMapping
+from collections.abc import AsyncIterator, Iterable, Iterator, MutableMapping
 from typing import Any
 
 import zarr
 from azure.core.exceptions import ResourceNotFoundError
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobProperties, BlobServiceClient, ContainerClient
+from zarr.abc.store import (
+    ByteRequest,
+    OffsetByteRequest,
+    RangeByteRequest,
+    Store,
+    SuffixByteRequest,
+)
+from zarr.buffer.cpu import Buffer
+from zarr.core.buffer.core import BufferPrototype
 
 # Standard containers — matches architecture decision
 CONTAINERS: tuple[str, ...] = ("raw", "staged", "features", "results", "catalog")
@@ -44,10 +54,11 @@ AZURITE_CONNECTION_STRING = (
 
 
 class ABSZarrStore(MutableMapping):
-    """Zarr-compatible MutableMapping backed by Azure Blob Storage.
+    """MutableMapping-based ABS store kept for backward compatibility.
 
-    Implements the MutableMapping interface so zarr 2.x and 3.x both accept it
-    as a store without requiring adlfs or fsspec[azure].  Works with Azurite.
+    Used internally by ``upload_zarr_store`` and any code that needs a
+    plain dict-like interface.  For opening Zarr groups with zarr v3,
+    use :class:`ABSZarrV3Store` (returned by :meth:`StorageClient.open_zarr_store`).
     """
 
     def __init__(self, container_client: ContainerClient, prefix: str = "") -> None:
@@ -87,6 +98,164 @@ class ABSZarrStore(MutableMapping):
         if not isinstance(key, str):
             return False
         return self._client.get_blob_client(self._full_key(key)).exists()
+
+
+def _apply_byte_range(data: bytes, byte_range: ByteRequest | None) -> bytes:
+    """Slice raw bytes according to a zarr v3 ByteRequest."""
+    if byte_range is None:
+        return data
+    if isinstance(byte_range, RangeByteRequest):
+        return data[byte_range.start : byte_range.end]
+    if isinstance(byte_range, OffsetByteRequest):
+        return data[byte_range.offset :]
+    if isinstance(byte_range, SuffixByteRequest):
+        return data[-byte_range.suffix :]
+    return data
+
+
+class ABSZarrV3Store(Store):
+    """Zarr v3 ``Store`` subclass backed by Azure Blob Storage / Azurite.
+
+    This is the correct store to pass to ``zarr.open_group()`` / ``zarr.open_array()``
+    with zarr ≥ 3.0.  Azure Blob operations are synchronous; they are dispatched via
+    ``asyncio.to_thread`` so the zarr async runtime is not blocked.
+
+    Args:
+        container_client: An ``azure.storage.blob.ContainerClient`` instance.
+        prefix: Blob key prefix (e.g. ``"volve/synthetic.zarr"``).  A trailing
+            ``/`` is added automatically if missing.
+        read_only: When ``True`` write/delete operations raise ``ValueError``.
+    """
+
+    supports_writes: bool = True
+    supports_deletes: bool = True
+    supports_listing: bool = True
+
+    def __init__(
+        self,
+        container_client: ContainerClient,
+        prefix: str = "",
+        *,
+        read_only: bool = False,
+    ) -> None:
+        super().__init__(read_only=read_only)
+        self._client = container_client
+        self._prefix = prefix.rstrip("/") + "/" if prefix else ""
+        # Mark as open immediately — Azure connection is stateless.
+        self._is_open = True
+
+    def _full_key(self, key: str) -> str:
+        return self._prefix + key
+
+    # ------------------------------------------------------------------ #
+    # Equality / repr                                                      #
+    # ------------------------------------------------------------------ #
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, type(self))
+            and self._prefix == other._prefix
+            and self._client.container_name == other._client.container_name
+        )
+
+    def __str__(self) -> str:
+        return f"abs://{self._client.container_name}/{self._prefix}"
+
+    def with_read_only(self, read_only: bool = False) -> ABSZarrV3Store:
+        return type(self)(self._client, prefix=self._prefix.rstrip("/"), read_only=read_only)
+
+    # ------------------------------------------------------------------ #
+    # Open / close (no-ops for stateless HTTP connection)                  #
+    # ------------------------------------------------------------------ #
+
+    async def _open(self) -> None:
+        self._is_open = True
+
+    def close(self) -> None:  # type: ignore[override]
+        self._is_open = False
+
+    # ------------------------------------------------------------------ #
+    # Read methods                                                         #
+    # ------------------------------------------------------------------ #
+
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: ByteRequest | None = None,
+    ) -> Buffer | None:
+        """Download a blob and return as a zarr Buffer, or None if not found."""
+        blob_client = self._client.get_blob_client(self._full_key(key))
+        try:
+            raw: bytes = await asyncio.to_thread(blob_client.download_blob().readall)
+        except ResourceNotFoundError:
+            return None
+        raw = _apply_byte_range(raw, byte_range)
+        return prototype.buffer.from_bytes(raw)
+
+    async def get_partial_values(
+        self,
+        prototype: BufferPrototype,
+        key_ranges: Iterable[tuple[str, ByteRequest | None]],
+    ) -> list[Buffer | None]:
+        """Retrieve multiple (possibly partial) values concurrently."""
+        tasks = [self.get(key, prototype, br) for key, br in key_ranges]
+        return list(await asyncio.gather(*tasks))
+
+    async def exists(self, key: str) -> bool:
+        blob_client = self._client.get_blob_client(self._full_key(key))
+        return await asyncio.to_thread(blob_client.exists)
+
+    # ------------------------------------------------------------------ #
+    # Write / delete methods                                               #
+    # ------------------------------------------------------------------ #
+
+    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+        self._check_writable()
+        blob_client = self._client.get_blob_client(self._full_key(key))
+        data = value.to_bytes()
+        await asyncio.to_thread(lambda: blob_client.upload_blob(data, overwrite=True))
+
+    async def delete(self, key: str) -> None:
+        self._check_writable()
+        blob_client = self._client.get_blob_client(self._full_key(key))
+        try:
+            await asyncio.to_thread(blob_client.delete_blob)
+        except ResourceNotFoundError:
+            pass  # zarr v3 Store.delete() is a no-op for missing keys
+
+    # ------------------------------------------------------------------ #
+    # Listing methods                                                      #
+    # ------------------------------------------------------------------ #
+
+    async def list(self) -> AsyncIterator[str]:
+        blobs: list[str] = await asyncio.to_thread(
+            lambda: [b.name for b in self._client.list_blobs(name_starts_with=self._prefix)]
+        )
+        for name in blobs:
+            yield name[len(self._prefix):]
+
+    async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+        full = self._prefix + prefix
+        blobs: list[str] = await asyncio.to_thread(
+            lambda: [b.name for b in self._client.list_blobs(name_starts_with=full)]
+        )
+        for name in blobs:
+            yield name[len(self._prefix):]
+
+    async def list_dir(self, prefix: str) -> AsyncIterator[str]:
+        prefix = prefix.rstrip("/")
+        full = self._prefix + (prefix + "/" if prefix else "")
+        blobs: list[str] = await asyncio.to_thread(
+            lambda: [b.name for b in self._client.list_blobs(name_starts_with=full)]
+        )
+        seen: set[str] = set()
+        for name in blobs:
+            relative = name[len(full):]
+            top = relative.split("/")[0]
+            if top and top not in seen:
+                seen.add(top)
+                yield top
 
 
 class StorageClient:
@@ -217,33 +386,56 @@ class StorageClient:
     # Zarr support                                                         #
     # ------------------------------------------------------------------ #
 
-    def _zarr_store(self, container: str, prefix: str) -> ABSZarrStore:
-        return ABSZarrStore(self._container(container), prefix=prefix)
+    def _abs_zarr_v3_store(
+        self, container: str, prefix: str, *, read_only: bool = False
+    ) -> ABSZarrV3Store:
+        return ABSZarrV3Store(self._container(container), prefix=prefix, read_only=read_only)
 
     def upload_zarr_store(
         self,
-        src_store: Any,
+        src_path: Any,
         container: str,
         prefix: str,
     ) -> None:
-        """Copy a local/in-memory Zarr store into blob storage.
+        """Upload a local Zarr store directory into blob storage.
+
+        Walks every file under *src_path* (a local directory or
+        :class:`zarr.storage.LocalStore`) and uploads each one as a blob,
+        preserving the relative key structure required by zarr v3.
 
         Args:
-            src_store: Any zarr-compatible store (local path, DirectoryStore, etc.)
+            src_path: Local filesystem path (``str`` or ``Path``) to a zarr store
+                directory, or a :class:`zarr.storage.LocalStore` instance.
             container:  Destination container (e.g. ``"staged"``)
-            prefix:     Blob key prefix (e.g. ``"surveys/volve/seismic.zarr"``)
+            prefix:     Blob key prefix (e.g. ``"volve/synthetic.zarr"``)
         """
-        dest = self._zarr_store(container, prefix)
-        zarr.copy_store(src_store, dest, if_exists="replace")
+        from pathlib import Path
 
-    def open_zarr_store(self, container: str, prefix: str) -> ABSZarrStore:
-        """Return a zarr-compatible store backed by blob storage.
+        if isinstance(src_path, zarr.storage.LocalStore):
+            root_dir = Path(src_path.root)
+        else:
+            root_dir = Path(src_path)
 
-        The returned store is suitable for ``zarr.open(store, mode="r|w|a")``.
+        dest_container = self._container(container)
+        pfx = prefix.rstrip("/") + "/" if prefix else ""
+
+        for blob_file in root_dir.rglob("*"):
+            if blob_file.is_file():
+                rel = blob_file.relative_to(root_dir).as_posix()
+                blob_key = pfx + rel
+                with open(blob_file, "rb") as fh:
+                    dest_container.get_blob_client(blob_key).upload_blob(fh, overwrite=True)
+
+    def open_zarr_store(self, container: str, prefix: str) -> ABSZarrV3Store:
+        """Return a zarr v3-compatible Store backed by blob storage.
+
+        The returned :class:`ABSZarrV3Store` is a proper ``zarr.abc.store.Store``
+        subclass and can be passed directly to ``zarr.open_group(store, mode="r")``.
 
         Example::
 
-            store = client.open_zarr_store("staged", "surveys/volve/seismic.zarr")
-            arr = zarr.open(store, mode="r")
+            store = client.open_zarr_store("staged", "volve/synthetic.zarr")
+            root = zarr.open_group(store, mode="r")
+            amp = root["amplitude"][0, :, :]
         """
-        return self._zarr_store(container, prefix)
+        return self._abs_zarr_v3_store(container, prefix, read_only=False)

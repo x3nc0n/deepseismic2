@@ -116,3 +116,67 @@ Real amplitude stats from `synthetic.json`: p01=−0.121, p99=+0.104, std=0.042.
 - **Fault sticks for demo inline 1050**: The `.dat` sticks cover inlines 1046–1097 (main) and 1073–1097 (antithetic). Inline 1050 will show 2 main-fault sticks. Most inlines will show 0–3 sticks, which is realistic.
 - **Checkpoint epoch metrics all 0.0**: The saved metrics (`iou=0.0, dice=0.0`) are placeholder values from the training scaffolding — they don't mean the model is untrained. The model ran 10 epochs and produces non-trivial output.
 
+## Learnings — 2026-06-24T14:25:19-05:00: ADLS Viewer Reader Extraction (Phase 2)
+
+### Backend resolver design
+
+`DEEPSEISMIC_DATA_BACKEND` env var (default `local` | `azure`) controls which
+storage backend the viewer data readers use.  A small `_LocalSources` /
+`_AzureSources` dataclass pair holds resolved paths/env-vars; resolved on each
+call (no module-level side effects), so it respects env changes between hot-reloads.
+
+### Env-var contract (verbatim — relay to infra issue #8)
+
+```
+DEEPSEISMIC_DATA_BACKEND         local | azure (default: local)
+DEEPSEISMIC_DATA_DIR             local base dir override (default: data/volve in repo)
+
+# Azure artifact locations (StorageClient also reads STORAGE_CONNECTION_STRING /
+# AZURE_STORAGE_ACCOUNT / STORAGE_ACCOUNT_NAME for auth):
+DEEPSEISMIC_AMP_CONTAINER        default: staged
+DEEPSEISMIC_AMP_PREFIX           default: volve/synthetic.zarr
+DEEPSEISMIC_FAULT_PROB_CONTAINER default: results
+DEEPSEISMIC_FAULT_PROB_PREFIX    default: volve/fault_prob.zarr
+DEEPSEISMIC_FAULT_MASK_CONTAINER default: results
+DEEPSEISMIC_FAULT_MASK_PREFIX    default: volve/fault_mask.zarr
+DEEPSEISMIC_STICKS_CONTAINER     default: raw
+DEEPSEISMIC_STICKS_PREFIX        default: volve/interpretations/fault_sticks
+```
+
+### zarr v3 ABSZarrStore compatibility finding
+
+**`ABSZarrStore` (MutableMapping) does NOT work with zarr v3.**
+`zarr.open_group(store=MutableMapping)` raises `TypeError: Unsupported type for
+store_like`.  zarr v3 requires a proper `zarr.abc.store.Store` subclass with
+async `get/set/delete/exists/list/list_prefix/list_dir` methods.
+
+**Fix:** Added `ABSZarrV3Store(zarr.abc.store.Store)` in `blob_client.py`.  Key
+implementation details:
+- Async methods dispatch blocking Azure SDK calls via `asyncio.to_thread`.
+- `get()` returns `prototype.buffer.from_bytes(raw_bytes)` — NOT `from_buffer`
+  (which expects an existing Buffer object, not plain bytes).
+- `with_read_only()` implemented — zarr calls this when `mode="r"`.
+- `_is_open = True` set in `__init__` (Azure connections are stateless HTTP).
+- `ABSZarrStore` (MutableMapping) kept for backward compat.
+- `upload_zarr_store` rewritten to walk local files directly (avoids zarr.copy_store
+  cross-version issues).
+
+### _data_readers.py extraction
+
+- `src/deepseismic/ui/_data_readers.py` — pure functions, no Streamlit, importable
+  in pytest.  Exports: `get_volume_coords`, `get_amplitude_slice`,
+  `get_fault_prob_slice`, `load_fault_sticks`, `AMP_VMIN`, `AMP_VMAX`.
+- `streamlit_app.py` has thin `@st.cache_data` wrappers that delegate to pure readers.
+- Fault sticks in azure backend: `list_blobs` + `download_blob` each `.dat`, parsed
+  with the canonical mapping.  Failure returns `{}` gracefully.
+- `fault_prob` absent in azure backend: `open_group` + probe → exception → `None`.
+
+### Proof of Azure read path
+
+Azurite not running in this environment.  Used a dict-backed mock `ContainerClient`
+that raises `azure.core.exceptions.ResourceNotFoundError` for missing keys — identical
+code path to real Azurite/ADLS.  Wrote a 10×20×50 float32 amplitude volume, read
+back via `zarr.open_group(store=ABSZarrV3Store, mode='r')`, asserted allclose.  Then
+exercised `_data_readers.get_volume_coords()` and `get_amplitude_slice()` with azure
+backend via patched `StorageClient` — all assertions passed.
+

@@ -29,6 +29,25 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 
+from deepseismic.ui._data_readers import (
+    AMP_VMAX as _AMP_VMAX,
+)
+from deepseismic.ui._data_readers import (
+    AMP_VMIN as _AMP_VMIN,
+)
+from deepseismic.ui._data_readers import (
+    get_amplitude_slice as _get_amplitude_slice_pure,
+)
+from deepseismic.ui._data_readers import (
+    get_fault_prob_slice as _get_fault_prob_slice_pure,
+)
+from deepseismic.ui._data_readers import (
+    get_volume_coords as _get_volume_coords_pure,
+)
+from deepseismic.ui._data_readers import (
+    load_fault_sticks as _load_fault_sticks_pure,
+)
+
 # ---------------------------------------------------------------------------
 # Page configuration — must be the first Streamlit call
 # ---------------------------------------------------------------------------
@@ -100,15 +119,7 @@ st.markdown(_CSS, unsafe_allow_html=True)
 # Data paths (relative to repo root)
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT  = Path(__file__).resolve().parents[3]
-_ZARR_AMP   = _REPO_ROOT / "data/volve/staged/synthetic.zarr"
-_ZARR_PROB  = _REPO_ROOT / "data/volve/staged/fault_prob.zarr"
-_ZARR_MASK  = _REPO_ROOT / "data/volve/staged/fault_mask.zarr"
-_STICKS_DIR = _REPO_ROOT / "data/volve/interpretations/fault_sticks"
-
-# Known amplitude clip values from synthetic.json sidecar (p01/p99)
-_AMP_VMIN: float = -0.121
-_AMP_VMAX: float = 0.104
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # ---------------------------------------------------------------------------
 # Session-state initialisation
@@ -134,42 +145,26 @@ def _init_session() -> None:
 _init_session()
 
 # ---------------------------------------------------------------------------
-# Real seismic data readers (cached)
+# Thin @st.cache_data wrappers — delegate to pure readers in _data_readers.py
 # ---------------------------------------------------------------------------
 
 
 @st.cache_data(show_spinner=False)
 def _get_volume_coords() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return (inline_arr, crossline_arr, twtt_ms_arr) from the amplitude Zarr."""
-    import zarr
-    root = zarr.open_group(str(_ZARR_AMP), mode="r")
-    return (
-        np.asarray(root["inline"][:]),
-        np.asarray(root["crossline"][:]),
-        np.asarray(root["twtt_ms"][:]),
-    )
+    return _get_volume_coords_pure()
 
 
 @st.cache_data(show_spinner=False)
 def _get_amplitude_slice(inline_abs: int) -> np.ndarray:
     """Return (n_xl, n_s) float32 amplitude slice for the given absolute inline."""
-    import zarr
-    root = zarr.open_group(str(_ZARR_AMP), mode="r")
-    il_arr, _, _ = _get_volume_coords()
-    idx = int(np.clip(np.searchsorted(il_arr, inline_abs), 0, len(il_arr) - 1))
-    return np.asarray(root["amplitude"][idx, :, :], dtype=np.float32)
+    return _get_amplitude_slice_pure(inline_abs)
 
 
 @st.cache_data(show_spinner=False)
 def _get_fault_prob_slice(inline_abs: int) -> np.ndarray | None:
     """Return (n_xl, n_s) fault probability slice, or None if bake not available."""
-    if not _ZARR_PROB.exists():
-        return None
-    import zarr
-    root = zarr.open_group(str(_ZARR_PROB), mode="r")
-    il_arr, _, _ = _get_volume_coords()
-    idx = int(np.clip(np.searchsorted(il_arr, inline_abs), 0, len(il_arr) - 1))
-    return np.asarray(root["fault_probability"][idx, :, :], dtype=np.float32)
+    return _get_fault_prob_slice_pure(inline_abs)
 
 
 @st.cache_data(show_spinner=False)
@@ -187,28 +182,7 @@ def _load_fault_sticks() -> dict[str, np.ndarray]:
     UTM-format file (Volve_Fault_Sticks_synthetic.txt) showing Z_ms 700-852 ms.
     If interpreted as true ms (50-77 ms, <7% depth), faults would be unrealistically shallow.
     """
-    sticks: dict[str, np.ndarray] = {}
-    if not _STICKS_DIR.exists():
-        return sticks
-    for dat_file in sorted(_STICKS_DIR.glob("*.dat")):
-        rows: list[tuple[float, float, float]] = []
-        with open(dat_file) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if len(parts) == 3:
-                    il_idx, xl_idx, z_samp = int(parts[0]), int(parts[1]), int(parts[2])
-                    # 0-based volume index → absolute coordinate
-                    abs_il = 1001 + il_idx
-                    abs_xl = 1900 + xl_idx
-                    # z column is sample index, not milliseconds
-                    twt_ms = float(z_samp) * 4.0
-                    rows.append((float(abs_il), float(abs_xl), twt_ms))
-        if rows:
-            sticks[dat_file.stem] = np.array(rows, dtype=np.float32)
-    return sticks
+    return _load_fault_sticks_pure()
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +430,9 @@ with col_viewer:
         st.session_state.show_fault_overlay,
         st.session_state.fault_threshold,
     )
-    if st.session_state.show_fault_overlay and _ZARR_PROB.exists():
+    if st.session_state.show_fault_overlay and _get_fault_prob_slice(
+        st.session_state.selected_inline
+    ) is not None:
         st.caption(
             "🟠 Fault probability overlay — UNet3D candidate detection. "
             "Requires analyst review. Not a final interpretation."

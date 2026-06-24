@@ -99,6 +99,16 @@ For tests that genuinely need real baked zarr volumes (`TestAmplitudeReader`, `T
 
 **Suite delta:** 102→131 passed (+29), 5 skipped unchanged, ruff clean.
 
+### 2026-06-24 — PR #3 CI Fix and Merge
+
+**Session:** Hudson fixed 11 CI failures + 7 errors in PR #3 viewer tests. Coordinator merged feat/real-fault-viewer to main.
+
+**CI remediation:** Two-tier strategy — (1) Synthesized minimal `.dat` fixture for critical coordinate-mapping regression guard; 8 tests now run in CI with zero data dependencies. (2) Added `@pytest.mark.skipif(path_missing)` to real-artifact reader tests; skip silently in CI, pass locally. Fixed inverted-guard bug where tests asserted file-exists but reader-returned-None when file simply wasn't present.
+
+**Validation:** All 29 viewer tests pass locally; 8 coordinate guards pass in CI; 21 reader tests skip gracefully in CI when artifacts absent. `ruff check src/` clean.
+
+**Merge:** Commit 776400a (squash). PR #3 ready for Phase 2 development.
+
 ## Scribe Cross-Agent Update — 2026-06-10T04:30-05:00
 Sprint 1 coordination complete. All agents delivered successfully.
 - 5 agents synchronized

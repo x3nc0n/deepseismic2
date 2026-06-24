@@ -205,6 +205,57 @@ streamlit run src/deepseismic/ui/streamlit_app.py
 
 Runtime: ~12s CPU.
 
+### Hudson Decision — CI-Safe Test Strategy for Viewer Data-Dependent Tests
+
+**Date:** 2026-06-24T12:26:00-05:00  
+**Author:** Hudson (QA)  
+**Status:** Adopted — PR #3 CI fix (commit dab69c8)  
+**Branch:** feat/real-fault-viewer
+
+#### Context
+
+PR #3 introduced `src/tests/test_viewer/test_viewer.py` (29 tests covering amplitude reader, fault-prob reader, fault-stick coordinate mapping, zarr roundtrip, and AST regression guard). Tests passed locally but failed in CI (11 failures + 7 errors) due to three gitignored data artifacts absent in CI runner:
+
+- `data/volve/staged/synthetic.zarr` (FileNotFoundError)
+- `data/volve/staged/fault_prob.zarr` (reader returns None, test fails)
+- `data/volve/interpretations/fault_sticks/*.dat` (missing, "No .dat files found")
+
+#### Decision: Two-Tier Strategy
+
+**Tier 1 — Critical regression guards: synthesize the fixture**
+
+`TestFaultStickCoordinateMapping` (highest-value test, guards z-as-sample-index bug) refactored to use `tmp_path_factory` fixture writing minimal synthetic `.dat` files (3 rows each) covering full pinned coordinate ranges. Regression math (`z_samp × 4.0 = twt_ms`) proven on synthetic data — real files unnecessary.
+
+Result: 8 coordinate-mapping tests run in CI with zero data dependencies. ✓
+
+**Tier 2 — Real-artifact readers: skip gracefully when absent**
+
+`TestAmplitudeReader` and `TestFaultProbReader` decorated with:
+
+```python
+@pytest.mark.skipif(
+    not _ZARR_PATH.exists(),
+    reason="data/volve/staged/X.zarr absent — run scripts/bake_demo_faults.py to generate",
+)
+```
+
+Self-documents missing artifact + fix. Tests skip silently in CI, pass locally.
+
+Result: Inverted-guard bug fixed; assertions now accurate when files are confirmed present. ✓
+
+#### Constraints Respected
+
+- No data files committed.
+- Coordinate-mapping assertions unchanged (pinned to 808–908 ms main fault, 1200–1228 ms antithetic).
+- `ruff check src/` passes.
+- CI workflow unchanged (existing `-m "not integration"` filter + new `skipif` guards produce clean run).
+
+#### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/tests/test_viewer/test_viewer.py` | Synthesized fault-stick fixture; added `@pytest.mark.skipif` to zarr readers |
+
 ### Lambert Decision — Agent Tool API Wiring (Updated)
 
 **Date:** 2026-06-09 (origin); Phase 1 integration verified  

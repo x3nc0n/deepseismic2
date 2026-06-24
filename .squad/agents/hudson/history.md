@@ -10,6 +10,24 @@
 
 ## Learnings
 
+### 2026-06-24 — ABSZarrV3Store + Azure/Local Resolver Tests (feat/adls-viewer-readers)
+
+**Session:** Added `src/tests/test_viewer/test_data_readers.py` — 26 new CI-safe tests covering Dallas's ADLS Phase 2 work (ABSZarrV3Store, _data_readers backend resolver).
+
+**Dict-backed mock ContainerClient pattern for testing ABSZarrV3Store without Azurite:**
+Build `_MockContainerClient` with a plain `dict[str, bytes]` as backing store. `get_blob_client(key)` returns a `_MockBlobClient` that proxies reads/writes through the shared dict. `download_blob()` raises `azure.core.exceptions.ResourceNotFoundError` for missing keys (not `FileNotFoundError`) so `ABSZarrV3Store.get()` catches it and returns `None`, exactly matching real Azure SDK behaviour. `asyncio.to_thread(blob_client.download_blob().readall)` calls `download_blob()` synchronously before threading — the mock `_Downloader` object returned by `download_blob()` has a plain `readall()` method. This pattern proves zarr v3 async store correctness with zero network dependency.
+
+**azure/local resolver testing via monkeypatch.setenv:**
+Use `monkeypatch.setenv("DEEPSEISMIC_DATA_BACKEND", "azure")` to activate the azure path, then `monkeypatch.setattr(_data_readers, "_storage_client", lambda: mock_client)` to inject a `_MockStorageClient` instance whose `open_zarr_store(container, prefix)` returns `ABSZarrV3Store(shared_mock_container, prefix=prefix)`. Multiple calls to `_storage_client()` in the same request (e.g. `get_amplitude_slice` calling `get_volume_coords` internally) all receive the same mock instance and thus read consistent data from the shared dict. For fault sticks, the mock also implements `list_blobs(container, prefix)` and `download_blob(container, blob_name)` to serve `.dat` file bytes.
+
+**Suite results (2026-06-24):**
+- New: 26 tests pass, 1 deselected (`@pytest.mark.integration`)
+- Full: `pytest -m "not integration" -q` → 155 passed, 2 skipped, 6 deselected ✓
+- `ruff check src/` → All checks passed ✓
+- Pushed: `18494f9` on `feat/adls-viewer-readers`
+
+**No bugs found** in Dallas's `_data_readers.py` or `blob_client.py`.
+
 ### 2026-06-24 — CI-Safe Viewer Tests (PR #3 Fix)
 
 **Session:** Fixed 11 CI failures + 7 errors caused by gitignored data artifacts absent on CI runner.
@@ -99,8 +117,37 @@ For tests that genuinely need real baked zarr volumes (`TestAmplitudeReader`, `T
 
 **Suite delta:** 102→131 passed (+29), 5 skipped unchanged, ruff clean.
 
+### 2026-06-24 — PR #3 CI Fix and Merge
+
+**Session:** Hudson fixed 11 CI failures + 7 errors in PR #3 viewer tests. Coordinator merged feat/real-fault-viewer to main.
+
+**CI remediation:** Two-tier strategy — (1) Synthesized minimal `.dat` fixture for critical coordinate-mapping regression guard; 8 tests now run in CI with zero data dependencies. (2) Added `@pytest.mark.skipif(path_missing)` to real-artifact reader tests; skip silently in CI, pass locally. Fixed inverted-guard bug where tests asserted file-exists but reader-returned-None when file simply wasn't present.
+
+**Validation:** All 29 viewer tests pass locally; 8 coordinate guards pass in CI; 21 reader tests skip gracefully in CI when artifacts absent. `ruff check src/` clean.
+
+**Merge:** Commit 776400a (squash). PR #3 ready for Phase 2 development.
+
 ## Scribe Cross-Agent Update — 2026-06-10T04:30-05:00
 Sprint 1 coordination complete. All agents delivered successfully.
 - 5 agents synchronized
 - 7 decision documents archived
 - Full team context available in decisions.md
+
+### 2026-06-24 — Phase 2: ADLS Viewer Backend Test Coverage (PR #4)
+
+**Session:** Hudson added comprehensive CI-safe test coverage for Dallas's Phase 2 ADLS viewer backend work (ABSZarrV3Store, backend resolver).
+
+**Test file:** `src/tests/test_viewer/test_data_readers.py` — 26 new tests covering:
+- `ABSZarrV3Store` round-trip (dict-backed mock ContainerClient, no Azurite/Azure SDK calls)
+- Backend resolver (local vs. azure via DEEPSEISMIC_DATA_BACKEND env-var)
+- Fault-stick coordinate mapping on both backends (regression guard: z_sample × 4.0 = twt_ms)
+- Graceful degradation (missing containers/blobs return empty dicts, not errors)
+
+**Dict-backed mock pattern:** Build `_MockContainerClient` with plain `dict[str, bytes]` backing store. `download_blob()` raises `azure.core.exceptions.ResourceNotFoundError` (not `FileNotFoundError`) so real zarr v3 store error-handling works identically. `asyncio.to_thread(blob_client.download_blob().readall)` pattern correctly deferred via shared mock instance — multiple calls in same request (e.g., `get_amplitude_slice` → `get_volume_coords` internally) read consistent data.
+
+**CI-safe:** No Azurite, no real Azure calls, no gitignored data files. 1 integration test deselected (`@pytest.mark.integration`); 26 unit tests pass in CI.
+
+**Result:** All tests pass; no bugs found in Dallas's code. (Three bugs in `ABSZarrV3Store` identified and fixed by review-storage + Dallas in parallel.)
+
+**Commit:** 18494f9 on feat/adls-viewer-readers. Validation: `pytest -m "not integration" -q` → 155 passed, 2 skipped, 6 deselected ✓; `ruff check src/` → All checks passed ✓
+

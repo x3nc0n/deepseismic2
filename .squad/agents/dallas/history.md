@@ -116,3 +116,117 @@ Real amplitude stats from `synthetic.json`: p01=−0.121, p99=+0.104, std=0.042.
 - **Fault sticks for demo inline 1050**: The `.dat` sticks cover inlines 1046–1097 (main) and 1073–1097 (antithetic). Inline 1050 will show 2 main-fault sticks. Most inlines will show 0–3 sticks, which is realistic.
 - **Checkpoint epoch metrics all 0.0**: The saved metrics (`iou=0.0, dice=0.0`) are placeholder values from the training scaffolding — they don't mean the model is untrained. The model ran 10 epochs and produces non-trivial output.
 
+## Learnings — 2026-06-24T14:25:19-05:00: ADLS Viewer Reader Extraction (Phase 2)
+
+### Backend resolver design
+
+`DEEPSEISMIC_DATA_BACKEND` env var (default `local` | `azure`) controls which
+storage backend the viewer data readers use.  A small `_LocalSources` /
+`_AzureSources` dataclass pair holds resolved paths/env-vars; resolved on each
+call (no module-level side effects), so it respects env changes between hot-reloads.
+
+### Env-var contract (verbatim — relay to infra issue #8)
+
+```
+DEEPSEISMIC_DATA_BACKEND         local | azure (default: local)
+DEEPSEISMIC_DATA_DIR             local base dir override (default: data/volve in repo)
+
+# Azure artifact locations (StorageClient also reads STORAGE_CONNECTION_STRING /
+# AZURE_STORAGE_ACCOUNT / STORAGE_ACCOUNT_NAME for auth):
+DEEPSEISMIC_AMP_CONTAINER        default: staged
+DEEPSEISMIC_AMP_PREFIX           default: volve/synthetic.zarr
+DEEPSEISMIC_FAULT_PROB_CONTAINER default: results
+DEEPSEISMIC_FAULT_PROB_PREFIX    default: volve/fault_prob.zarr
+DEEPSEISMIC_FAULT_MASK_CONTAINER default: results
+DEEPSEISMIC_FAULT_MASK_PREFIX    default: volve/fault_mask.zarr
+DEEPSEISMIC_STICKS_CONTAINER     default: raw
+DEEPSEISMIC_STICKS_PREFIX        default: volve/interpretations/fault_sticks
+```
+
+### zarr v3 ABSZarrStore compatibility finding
+
+**`ABSZarrStore` (MutableMapping) does NOT work with zarr v3.**
+`zarr.open_group(store=MutableMapping)` raises `TypeError: Unsupported type for
+store_like`.  zarr v3 requires a proper `zarr.abc.store.Store` subclass with
+async `get/set/delete/exists/list/list_prefix/list_dir` methods.
+
+**Fix:** Added `ABSZarrV3Store(zarr.abc.store.Store)` in `blob_client.py`.  Key
+implementation details:
+- Async methods dispatch blocking Azure SDK calls via `asyncio.to_thread`.
+- `get()` returns `prototype.buffer.from_bytes(raw_bytes)` — NOT `from_buffer`
+  (which expects an existing Buffer object, not plain bytes).
+- `with_read_only()` implemented — zarr calls this when `mode="r"`.
+- `_is_open = True` set in `__init__` (Azure connections are stateless HTTP).
+- `ABSZarrStore` (MutableMapping) kept for backward compat.
+- `upload_zarr_store` rewritten to walk local files directly (avoids zarr.copy_store
+  cross-version issues).
+
+### _data_readers.py extraction
+
+- `src/deepseismic/ui/_data_readers.py` — pure functions, no Streamlit, importable
+  in pytest.  Exports: `get_volume_coords`, `get_amplitude_slice`,
+  `get_fault_prob_slice`, `load_fault_sticks`, `AMP_VMIN`, `AMP_VMAX`.
+- `streamlit_app.py` has thin `@st.cache_data` wrappers that delegate to pure readers.
+- Fault sticks in azure backend: `list_blobs` + `download_blob` each `.dat`, parsed
+  with the canonical mapping.  Failure returns `{}` gracefully.
+- `fault_prob` absent in azure backend: `open_group` + probe → exception → `None`.
+
+### Proof of Azure read path
+
+Azurite not running in this environment.  Used a dict-backed mock `ContainerClient`
+that raises `azure.core.exceptions.ResourceNotFoundError` for missing keys — identical
+code path to real Azurite/ADLS.  Wrote a 10×20×50 float32 amplitude volume, read
+back via `zarr.open_group(store=ABSZarrV3Store, mode='r')`, asserted allclose.  Then
+exercised `_data_readers.get_volume_coords()` and `get_amplitude_slice()` with azure
+backend via patched `StorageClient` — all assertions passed.
+
+## Learnings — 2026-06-11: ABSZarrV3Store code-review bug fixes
+
+### asyncio.to_thread eager-evaluation gotcha
+
+`asyncio.to_thread(expr.method)` defers only `method` — `expr` is evaluated **immediately**
+on the calling thread before the thread pool ever runs.  In
+`asyncio.to_thread(blob_client.download_blob().readall)`, `download_blob()` is a
+blocking HTTP round-trip that executes synchronously on the event-loop thread, defeating
+the entire purpose of `to_thread`.  The fix is always to wrap the full call in a lambda:
+`asyncio.to_thread(lambda: blob_client.download_blob().readall())`.
+
+Rule of thumb: if the callable you hand to `to_thread` is the result of a *call expression*
+(parentheses on the right), you likely have a bug.  Use a lambda or `functools.partial`
+to defer the whole expression.
+
+### The -0 suffix slicing trap
+
+In Python, `-0 == 0`, so `data[-0:]` is identical to `data[0:]` and returns the entire
+sequence — **not** an empty slice.  Any code that uses a user-supplied integer as a
+negative index must guard the zero case explicitly:
+
+```python
+if n == 0:
+    return b""
+return data[-n:]
+```
+
+This pattern applies to any suffix/tail slice: list, bytes, str, numpy array.
+
+### 2026-06-24 — Phase 2: ADLS Viewer Backend (Option B) + Bug Fixes
+
+**PR #4 (feat/adls-viewer-readers):** Implemented Option B ADLS viewer backend — app reads artifacts directly from ADLS Gen2 with pure data-reader extraction and zarr v3 async store compatibility.
+
+**Key decisions:**
+1. Extracted all data-access logic into `src/deepseismic/ui/_data_readers.py` (pure functions, no Streamlit imports) so Hudson could write proper unit tests without mocking Streamlit.
+2. Added `ABSZarrV3Store(zarr.abc.store.Store)` — proper zarr v3 async Store over Azure Blob Storage — to `blob_client.py`.
+3. Implemented graceful degradation: missing fault_prob artifact returns `None`, viewer renders amplitude-only with warning.
+4. Backend env-var contract (DEEPSEISMIC_DATA_BACKEND=local|azure) relayed to infra issue #8 (comment 4793304744).
+
+**Code review (review-storage):** Found 3 blocking bugs in `ABSZarrV3Store`:
+- **Critical:** Event loop blocked on every chunk read (`asyncio.to_thread` evaluates blocking call on main thread before deferred execution). Fixed by wrapping in lambda: `await asyncio.to_thread(lambda: blob_client.download_blob().readall())`.
+- **High:** `SuffixByteRequest(0)` returns entire blob (Python `-0 == 0` quirk). Fixed by guarding: `if suffix == 0: return b""`.
+- **Medium:** `set()` accepts `byte_range` parameter but ignores it (silent failure). Fixed by raising `NotImplementedError("ABSZarrV3Store does not support partial writes")`.
+
+**Fix commit:** b2b2b58 (+ docs 25b588e). Validation: ruff clean, 156 tests passed.
+
+**Test coverage (hudson-1):** Added `src/tests/test_viewer/test_data_readers.py` — 26 CI-safe tests using dict-backed mock ContainerClient (no Azurite). All tests pass; no bugs found in `_data_readers.py` or fixed `blob_client.py`.
+
+**Status:** CI green, PR #4 approved and ready to merge.
+

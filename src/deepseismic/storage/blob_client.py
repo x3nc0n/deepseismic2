@@ -109,6 +109,8 @@ def _apply_byte_range(data: bytes, byte_range: ByteRequest | None) -> bytes:
     if isinstance(byte_range, OffsetByteRequest):
         return data[byte_range.offset :]
     if isinstance(byte_range, SuffixByteRequest):
+        if byte_range.suffix == 0:
+            return b""
         return data[-byte_range.suffix :]
     return data
 
@@ -187,7 +189,7 @@ class ABSZarrV3Store(Store):
         """Download a blob and return as a zarr Buffer, or None if not found."""
         blob_client = self._client.get_blob_client(self._full_key(key))
         try:
-            raw: bytes = await asyncio.to_thread(blob_client.download_blob().readall)
+            raw: bytes = await asyncio.to_thread(lambda: blob_client.download_blob().readall())
         except ResourceNotFoundError:
             return None
         raw = _apply_byte_range(raw, byte_range)
@@ -212,6 +214,8 @@ class ABSZarrV3Store(Store):
 
     async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
         self._check_writable()
+        if byte_range is not None:
+            raise NotImplementedError("ABSZarrV3Store does not support partial writes")
         blob_client = self._client.get_blob_client(self._full_key(key))
         data = value.to_bytes()
         await asyncio.to_thread(lambda: blob_client.upload_blob(data, overwrite=True))

@@ -209,6 +209,11 @@ class TestApplyByteRange:
         result = _apply_byte_range(self._DATA, SuffixByteRequest(4))
         assert result == b"6789"
 
+    def test_suffix_zero_returns_empty(self) -> None:
+        # SuffixByteRequest(0): -0 == 0 so data[0:] would return all bytes — must return b""
+        result = _apply_byte_range(self._DATA, SuffixByteRequest(0))
+        assert result == b""
+
 
 # ============================================================================
 # 2. ABSZarrV3Store round-trip (CI-safe, dict-backed mock container)

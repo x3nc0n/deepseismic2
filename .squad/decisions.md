@@ -31,6 +31,211 @@
 - Document architectural decisions here
 - Keep history focused on work, decisions focused on direction
 
+## Phase 1 — Real Fault Viewer Decisions (2026-06-24)
+
+### Ripley Decision — Wire Real Seismic Traces & Fault Detection to Streamlit Viewer
+
+**Date:** 2026-06-24T12:19:34-05:00  
+**Author:** Ripley (Lead/Architect)  
+**Status:** Adopted — Phase 1 implemented by Dallas  
+**Scope:** Demo viewer upgrade from synthetic placeholders to real data
+
+#### Context
+
+The Streamlit viewer (`src/deepseismic/ui/streamlit_app.py`) was rendering 100% synthetic data via `_generate_synthetic_section()` and `_generate_fault_mask()`. Staged Zarr volumes exist at `data/volve/zarr/demo/` (100 inlines × 200 crosslines × 500 samples, zarr v3). Trained UNet3D checkpoints available at `checkpoints/latest.pt`. Inference engine in `src/deepseismic/models/inference.py`. No pre-baked fault results existed; only validation outputs.
+
+#### Architecture Recommendation: Pre-baked Results Zarr (offline-first)
+
+| Option | Pros | Cons |
+|--------|------|------|
+| A. On-demand inference per inline | Always fresh | UNet on CPU ~30-60s; poor UX |
+| B. Call overlay API at runtime | Uses existing route | Requires FastAPI server; infra overhead |
+| **C. Pre-bake results Zarr once, read slices directly** | Instant response, zero runtime deps, offline-capable, simplest | Stale if model changes (trivial re-run) |
+
+#### ✅ Adopted: Option C — pre-bake + direct Zarr read
+
+Demo volume is tiny (100×200×500 = 10M voxels, ~40 MB). One `run_inference()` call produces `fault_prob.zarr` and `fault_mask.zarr`. Viewer reads slices with zero network calls, zero server deps, instant slider response.
+
+#### Phase 1 Implementation (Dallas, COMPLETED)
+
+- **1a. Bake fault results:** Write `scripts/bake_demo_faults.py` → input `data/volve/zarr/demo`, checkpoint `checkpoints/latest.pt`, output `fault_prob.zarr` + `fault_mask.zarr`. CPU runtime ~12s.
+- **1b. Wire real amplitude traces:** Replace `_generate_synthetic_section()` with zarr slice reader. Use real coordinate arrays (inline 1001–1100, XL 1900–2099, TWT 0–1996ms). Read `amplitude[il_idx, :, :]`.
+- **1c. Wire real fault overlay:** Replace `_generate_fault_mask()` with fault_prob reader. Slice `fault_prob[il_idx, :, :]` as 2D probability heatmap.
+- **1d. Update sidebar/captions:** Dynamic slider bounds from zarr metadata. Remove synthetic labels. Add data source caption.
+
+#### Risks Mitigated
+
+| Risk | Mitigation |
+|------|-----------|
+| `latest.pt` produces garbage on demo volume | Dallas QC'd output before wiring — PASS |
+| zarr v2/v3 incompatibility in inference writer | Fixed in `_write_zarr_volume()` — zarr v3 API |
+| Offline capability limited by disk | Bake script runs once; zarr cached locally |
+
+#### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/deepseismic/models/inference.py` | Fixed zarr v2→v3 bug |
+| `src/deepseismic/ui/streamlit_app.py` | Rewired to real Zarr + fault prob + sticks |
+| `scripts/bake_demo_faults.py` | New — one-shot inference bake script |
+
+### Ash Advisory — Trace & Fault Demo Credibility Guidance
+
+**Date:** 2026-06-24T12:22:22-05:00  
+**Author:** Ash (Geophysicist SME)  
+**Status:** Advisory — guiding Dallas wiring + UI/Lambert
+
+#### What "Genuinely Identifying Seismic Traces" Means
+
+1. **Real amplitudes from Zarr**: Read `root["amplitude"][inline_idx, :, :]` — must replace random generation. Use coordinate arrays `inline`, `crossline`, `twtt_ms` for axis labels.
+2. **Correct axes/units**: TWT extent 0–1996 ms (not 4000), crossline 1900–2099 (not 950–1100), inline 1001–1100 (not 1000–1200).
+3. **Amplitude scaling**: Real data nearly zero-mean (mean=5e-7) but asymmetric (max=1.107 vs min=-0.488). Use vmin/vmax from p01/p99 (±0.10–0.12), not absolute extrema.
+4. **Display mode**: Variable-density (VD) colormap is sufficient. Wiggle traces overlay every 5th crossline for geophysicist credibility.
+5. **Meaningful labeling**: Axis labels "Crossline" / "Two-way time (ms)", title shows inline number + survey name, colorbar labeled "Amplitude (normalised)".
+
+#### What Makes a Fault Overlay Credible
+
+1. **Use real model output, not hardcoded mask**: Pre-run inference, cache as Zarr, read slices at requested inline.
+2. **Probability not binary**: Display continuous float32 (0–1) with transparent overlay, not thresholded binary. Threshold slider (0.3–0.7, default 0.5) lets viewer see sensitivity.
+3. **Overlay fault sticks for comparison**: Parse `.dat` files, filter by inline, plot as red dots/lines. **Critical:** Coordinate mapping must be correct.
+4. **Distinct overlays**: UNet probability (warm semi-transparent) + fault sticks (bright discrete markers) — never merge.
+5. **Disclose artifacts**: Flag edge effects (outer 5–10 bin strip unreliable), high-amplitude false-positives (bright spots), training boundary artifacts (model saw ~70% of volume).
+
+#### Honesty Requirements (Non-Negotiable)
+
+**Required disclosures:**
+1. "Synthetic dataset — generated to approximate Volve ST10010 geometry. Not licensed field data."
+2. "UNet3D trained on synthetic fault labels from dilated fault sticks. No independent validation dataset."
+3. "UNet fault probability — candidate identification only. Requires analyst review. Not a final interpretation."
+4. If metrics shown: "Metrics computed against synthetic labels used to train the model. Circular validation — training diagnostics only."
+
+#### Demo Credibility Checklist (Priority-Ranked)
+
+| # | Item | Impact | Status |
+|---|---|---|---|
+| 1 | Read real Zarr amplitudes (replace synthetic) | Highest | ✅ DONE |
+| 2 | Pre-run inference, cache as Zarr | Highest | ✅ DONE |
+| 3 | Overlay fault sticks on matching inlines | High | ✅ DONE |
+| 4 | Probability colorbar (0–1) labelled | High | ✅ DONE |
+| 5 | Threshold slider (0.3–0.7, default 0.5) | Medium | ✅ DONE |
+| 6 | Amplitude colorbar (p1/p99 clip) | Medium | ✅ DONE |
+| 7 | Fault voxel fraction readout | Medium | ✅ DONE |
+| 8 | Synthetic data disclosure banner | Required | ✅ DONE |
+| 9 | Wiggle trace overlay every 5th CL | Low-medium | Deferred |
+| 10 | IoU vs. synthetic labels (with caveat) | Low | Deferred |
+
+#### Coordinate Consistency Resolution
+
+`.dat` files use `(inline_idx, crossline_idx, z_ms)` format. Values z=202–307 map to TWT samples 50–77 (~280 ms), unrealistically shallow. `Volve_Fault_Sticks_synthetic.txt` (UTM format) shows Z_ms 700–852 ms. **Resolution:** z column is **sample index**, not ms. TWT_ms = z × 4.0 → 808–1228 ms range overlaps UTM data. Mapping canonical:
+```
+abs_inline = 1001 + dat_inline_col
+abs_crossline = 1900 + dat_crossline_col
+twt_ms = dat_z_col * 4.0
+```
+
+### Dallas Decision — Real Fault Viewer Implementation (COMPLETED)
+
+**Date:** 2026-06-24T12:25:08-05:00  
+**Author:** Dallas (Data/ML Engineer)  
+**Status:** Implemented — ready for team review  
+
+#### What Was Done
+
+Replaced synthetic placeholder viewer with real seismic data and real UNet fault detections.
+
+#### Decision 1: Baked Zarr Paths and Contract
+
+| Store | Array | Shape | Dtype |
+|-------|-------|-------|-------|
+| `data/volve/staged/synthetic.zarr` | `amplitude` | (100, 200, 500) | float32 |
+| `data/volve/staged/synthetic.zarr` | `inline` | (100,) | int32 |
+| `data/volve/staged/synthetic.zarr` | `crossline` | (200,) | int32 |
+| `data/volve/staged/synthetic.zarr` | `twtt_ms` | (500,) | float32 |
+| `data/volve/staged/fault_prob.zarr` | `fault_probability` | (100, 200, 500) | float32 |
+| `data/volve/staged/fault_mask.zarr` | `fault_mask` | (100, 200, 500) | uint8 |
+
+Baked results live in `data/volve/staged/` alongside amplitude for trivial viewer loading.
+
+#### Decision 2: Fault-Stick Coordinate Mapping (RESOLVED)
+
+**Evidence:** `.dat` z values 202–307 × 4 ms/sample = 808–1228 ms overlaps `Volve_Fault_Sticks_synthetic.txt` UTM range (700–852 ms). All `.dat` columns are 0-based volume indices.
+
+**Canonical mapping:**
+```
+abs_inline = 1001 + dat_inline_col
+abs_crossline = 1900 + dat_crossline_col
+twt_ms = dat_z_col * 4.0
+```
+
+#### Decision 3: Model QC Outcome — PASS
+
+Inference: `checkpoints/latest.pt` (epoch 10) on `data/volve/staged/synthetic.zarr`. CPU 11.8s, 88 patches @ batch=4.
+
+| QC metric | Value | Verdict |
+|-----------|-------|---------|
+| Prob range | 0.000 – 1.000 | PASS |
+| Prob mean | 0.1258 | PASS |
+| Prob p10/p90 | 0.016 / 0.313 | PASS |
+| Fault voxel fraction | 3.89% | PASS |
+
+**Demo credibility:** PASS. Wire to viewer.
+
+#### Decision 4: Zarr v3 Bug Fix
+
+`_write_zarr_volume()` fixed from zarr v2 API (`DirectoryStore` + `create_dataset()`) to zarr v3 (`LocalStore` + `create_array()`). Consistent with `segy_loader.py` and `interpretation.py`. Chunk shape (64, 64, 128) preserved.
+
+#### Viewer Changes Summary
+
+- `_generate_synthetic_section()` → `_get_amplitude_slice(inline_abs)` (real zarr)
+- `_generate_fault_mask()` → `_get_fault_prob_slice(inline_abs)` (real prob)
+- Inline slider: 1000–1200 → 1001–1100 (from zarr coords)
+- Extent: 950–1100 XL / 0–4000 ms → 1900–2099 XL / 0–1996 ms
+- Amplitude clip: ±0.8 → ±0.12 (p01/p99)
+- Added: amplitude colorbar, fault prob colorbar, threshold slider (0.3–0.7)
+- Added: fault stick scatter overlay (red dots, current inline only)
+- Added: warning if bake missing
+- MOCK_MODE / agent chat unchanged
+
+#### Bake Script Usage
+
+```bash
+python scripts/bake_demo_faults.py
+streamlit run src/deepseismic/ui/streamlit_app.py
+```
+
+Runtime: ~12s CPU.
+
+### Lambert Decision — Agent Tool API Wiring (Updated)
+
+**Date:** 2026-06-09 (origin); Phase 1 integration verified  
+**Author:** Lambert (AI Integration Specialist)  
+**Status:** Live + verifying with real fault viewer
+
+#### Context
+
+FastAPI backend (13 endpoints) now live. Agent tool modules previously called stub paths. All tool modules unified under `_api_client.py` with consistent HTTP/retry logic.
+
+#### Key Decisions
+
+1. **Shared `_api_client.py` module**: Single HTTP client for all tools; centralises timeout/retry policy; `DEEPSEISMIC_API_URL` resolution consistent across all tools.
+2. **`httpx` promoted to core dependency**: `_api_client.py` is core agent package; moved from `[ui]` optional to main `dependencies`.
+3. **Endpoint mapping — seismic tools**:
+   - `query_survey_metadata` → `GET /api/surveys`
+   - `get_inline_section` → `GET /api/surveys/{id}/inline/{n}`
+   - `run_fault_detection` → `POST /api/interpretation/fault-detection`
+   - `get_interpretation_status` → `GET /api/interpretation/{run_id}/status`
+4. **Endpoint mapping — geological tools**: Per-well GET calls + client-side composition for correlation.
+5. **Endpoint mapping — reporting tools**: Compose from `/api/interpretation/{run_id}/status` + `.../results`.
+6. **Mock fallback unchanged**: `MOCK_LLM=true` → canned data; `false/unset` → real API with graceful degrade on `APIError`.
+
+#### Files Changed
+
+- `src/deepseismic/agent/tools/_api_client.py` — new
+- `src/deepseismic/agent/tools/seismic_tools.py` — live paths
+- `src/deepseismic/agent/tools/geological_tools.py` — live paths
+- `src/deepseismic/agent/tools/reporting_tools.py` — live paths
+- `pyproject.toml` — httpx to core deps
+
 ## Merged Decisions
 
 ## Inbox: coordinator-ui-localdev-labels

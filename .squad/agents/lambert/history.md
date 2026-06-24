@@ -37,3 +37,11 @@ Sprint 1 coordination complete. All agents delivered successfully.
 - 5 agents synchronized
 - 7 decision documents archived
 - Full team context available in decisions.md
+
+## Scribe Cross-Agent Update — 2026-06-24T12:41:40-05:00
+
+Phase 1 (Real Fault Viewer) complete. Phase 2 planning note:
+- **For Phase 2:** Wire a new "detect_faults" agent tool. Current viewer pre-bakes fault results; Phase 2 will add on-demand detection (button in UI, agent tool for Foundry). Viewer no longer fakes seismic data or fault detection — both now real/live.
+- **Data source:** Real Zarr amplitude from data/volve/staged/synthetic.zarr, real UNet fault probability from data/volve/staged/fault_prob.zarr (baked once by Dallas).
+- **Coordinate mapping:** Fault stick overlay now uses correct mapping (z_ms column = sample index × 4.0). All coordinate transforms verified against UTM reference data.
+- **Agent-tool feasibility:** Phase 2 detect_faults tool will call POST /api/interpretation/fault-detection with survey_id + optional checkpoint_blob parameter, return probability volume → agent streams inline slices to UI on user request.

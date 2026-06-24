@@ -69,12 +69,12 @@ def _fault_prob_slice(inline_abs: int, zarr_path: Path = _ZARR_PROB) -> np.ndarr
     return np.asarray(root["fault_probability"][idx, :, :], dtype=np.float32)
 
 
-def _parse_fault_sticks() -> dict[str, np.ndarray]:
+def _parse_fault_sticks(sticks_dir: Path = _STICKS_DIR) -> dict[str, np.ndarray]:
     """Mirror of _load_fault_sticks() — applies the canonical coordinate mapping."""
     sticks: dict[str, np.ndarray] = {}
-    if not _STICKS_DIR.exists():
+    if not sticks_dir.exists():
         return sticks
-    for dat_file in sorted(_STICKS_DIR.glob("*.dat")):
+    for dat_file in sorted(sticks_dir.glob("*.dat")):
         rows: list[tuple[float, float, float]] = []
         with open(dat_file) as fh:
             for line in fh:
@@ -98,6 +98,10 @@ def _parse_fault_sticks() -> dict[str, np.ndarray]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not _ZARR_AMP.exists(),
+    reason="data/volve/staged/synthetic.zarr absent — run scripts/bake_demo_faults.py to generate",
+)
 class TestAmplitudeReader:
     """Validate _get_amplitude_slice logic against the real staged zarr."""
 
@@ -153,6 +157,10 @@ class TestAmplitudeReader:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not _ZARR_PROB.exists(),
+    reason="data/volve/staged/fault_prob.zarr absent — run scripts/bake_demo_faults.py to generate",
+)
 class TestFaultProbReader:
     """Validate _get_fault_prob_slice logic against the baked fault_prob.zarr."""
 
@@ -202,12 +210,30 @@ class TestFaultStickCoordinateMapping:
     Regression guard: if the bug of treating z_ms as true milliseconds were
     reintroduced, fault TWT values would be ~202–307 ms (unrealistically shallow).
     These tests fail loudly on that regression.
+
+    The fixture synthesizes small .dat files so this critical guard runs in CI
+    without requiring gitignored data artifacts.
     """
 
     @pytest.fixture(scope="class")
-    def sticks(self) -> dict[str, np.ndarray]:
-        loaded = _parse_fault_sticks()
-        assert loaded, f"No .dat files found in {_STICKS_DIR}"
+    def synth_sticks_dir(self, tmp_path_factory: pytest.TempPathFactory) -> Path:
+        """Write minimal synthetic .dat files covering all pinned coordinate ranges."""
+        d = tmp_path_factory.mktemp("fault_sticks")
+        # fault_main_normal: il_idx 45–95, xl_idx 84–124, z_samp 202–227
+        # → abs_il 1046–1096, abs_xl 1984–2024, twt 808–908 ms
+        (d / "fault_main_normal.dat").write_text(
+            "45 84 202\n70 104 215\n95 124 227\n", encoding="utf-8"
+        )
+        # fault_antithetic: z_samp 300–307 → twt 1200–1228 ms
+        (d / "fault_antithetic.dat").write_text(
+            "0 0 300\n5 5 303\n10 10 307\n", encoding="utf-8"
+        )
+        return d
+
+    @pytest.fixture(scope="class")
+    def sticks(self, synth_sticks_dir: Path) -> dict[str, np.ndarray]:
+        loaded = _parse_fault_sticks(synth_sticks_dir)
+        assert loaded, "Synthetic .dat fixtures produced no parsed sticks"
         return loaded
 
     def test_both_fault_files_loaded(self, sticks: dict[str, np.ndarray]):

@@ -10,6 +10,24 @@
 
 ## Learnings
 
+### 2026-06-24 — ABSZarrV3Store + Azure/Local Resolver Tests (feat/adls-viewer-readers)
+
+**Session:** Added `src/tests/test_viewer/test_data_readers.py` — 26 new CI-safe tests covering Dallas's ADLS Phase 2 work (ABSZarrV3Store, _data_readers backend resolver).
+
+**Dict-backed mock ContainerClient pattern for testing ABSZarrV3Store without Azurite:**
+Build `_MockContainerClient` with a plain `dict[str, bytes]` as backing store. `get_blob_client(key)` returns a `_MockBlobClient` that proxies reads/writes through the shared dict. `download_blob()` raises `azure.core.exceptions.ResourceNotFoundError` for missing keys (not `FileNotFoundError`) so `ABSZarrV3Store.get()` catches it and returns `None`, exactly matching real Azure SDK behaviour. `asyncio.to_thread(blob_client.download_blob().readall)` calls `download_blob()` synchronously before threading — the mock `_Downloader` object returned by `download_blob()` has a plain `readall()` method. This pattern proves zarr v3 async store correctness with zero network dependency.
+
+**azure/local resolver testing via monkeypatch.setenv:**
+Use `monkeypatch.setenv("DEEPSEISMIC_DATA_BACKEND", "azure")` to activate the azure path, then `monkeypatch.setattr(_data_readers, "_storage_client", lambda: mock_client)` to inject a `_MockStorageClient` instance whose `open_zarr_store(container, prefix)` returns `ABSZarrV3Store(shared_mock_container, prefix=prefix)`. Multiple calls to `_storage_client()` in the same request (e.g. `get_amplitude_slice` calling `get_volume_coords` internally) all receive the same mock instance and thus read consistent data from the shared dict. For fault sticks, the mock also implements `list_blobs(container, prefix)` and `download_blob(container, blob_name)` to serve `.dat` file bytes.
+
+**Suite results (2026-06-24):**
+- New: 26 tests pass, 1 deselected (`@pytest.mark.integration`)
+- Full: `pytest -m "not integration" -q` → 155 passed, 2 skipped, 6 deselected ✓
+- `ruff check src/` → All checks passed ✓
+- Pushed: `18494f9` on `feat/adls-viewer-readers`
+
+**No bugs found** in Dallas's `_data_readers.py` or `blob_client.py`.
+
 ### 2026-06-24 — CI-Safe Viewer Tests (PR #3 Fix)
 
 **Session:** Fixed 11 CI failures + 7 errors caused by gitignored data artifacts absent on CI runner.

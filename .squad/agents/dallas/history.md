@@ -180,3 +180,32 @@ back via `zarr.open_group(store=ABSZarrV3Store, mode='r')`, asserted allclose.  
 exercised `_data_readers.get_volume_coords()` and `get_amplitude_slice()` with azure
 backend via patched `StorageClient` — all assertions passed.
 
+## Learnings — 2026-06-11: ABSZarrV3Store code-review bug fixes
+
+### asyncio.to_thread eager-evaluation gotcha
+
+`asyncio.to_thread(expr.method)` defers only `method` — `expr` is evaluated **immediately**
+on the calling thread before the thread pool ever runs.  In
+`asyncio.to_thread(blob_client.download_blob().readall)`, `download_blob()` is a
+blocking HTTP round-trip that executes synchronously on the event-loop thread, defeating
+the entire purpose of `to_thread`.  The fix is always to wrap the full call in a lambda:
+`asyncio.to_thread(lambda: blob_client.download_blob().readall())`.
+
+Rule of thumb: if the callable you hand to `to_thread` is the result of a *call expression*
+(parentheses on the right), you likely have a bug.  Use a lambda or `functools.partial`
+to defer the whole expression.
+
+### The -0 suffix slicing trap
+
+In Python, `-0 == 0`, so `data[-0:]` is identical to `data[0:]` and returns the entire
+sequence — **not** an empty slice.  Any code that uses a user-supplied integer as a
+negative index must guard the zero case explicitly:
+
+```python
+if n == 0:
+    return b""
+return data[-n:]
+```
+
+This pattern applies to any suffix/tail slice: list, bytes, str, numpy array.
+

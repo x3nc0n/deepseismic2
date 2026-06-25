@@ -447,15 +447,14 @@ class FaultMaskGenerator:
         chunks = chunks or (64, 64, 128)
         output_path = Path(output_path)
 
-        store = zarr.DirectoryStore(str(output_path))
+        # zarr v3: LocalStore replaces DirectoryStore; create_array replaces create_dataset
+        store = zarr.storage.LocalStore(str(output_path))
         root = zarr.open_group(store, mode="w" if overwrite else "w-")
 
-        z = root.create_dataset(
+        z = root.create_array(
             "fault_mask",
-            data=self._mask,
+            data=self._mask.astype(np.uint8),
             chunks=chunks,
-            dtype=np.uint8,
-            compressor=zarr.Blosc(cname="zstd", clevel=7, shuffle=zarr.Blosc.BITSHUFFLE),
             overwrite=overwrite,
         )
         logger.info(

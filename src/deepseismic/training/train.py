@@ -1,14 +1,14 @@
 """Training pipeline for the 3D UNet fault detection model.
 
 Orchestrates: label generation -> patch extraction -> model training -> checkpoint.
-Supports both real Volve data and synthetic sample data for local validation.
+Supports both real Volve data (zarr mode) and synthetic sample data.
 
 Usage:
     # Train on synthetic sample (local dev, no GPU needed)
     python -m deepseismic.training.train --epochs 5
 
-    # Train on real Volve data (GPU recommended)
-    python -m deepseismic.training.train --epochs 50 --device cuda
+    # Train on real Volve fault_label.zarr (PoC)
+    python -m deepseismic.training.train --data-mode zarr --epochs 10
 
     # Resume from checkpoint
     python -m deepseismic.training.train --resume checkpoints/latest.pt
@@ -17,7 +17,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
 import logging
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 class TrainConfig:
     """Training hyperparameters."""
 
+    # Core training
     epochs: int = 20
     batch_size: int = 4
     learning_rate: float = 1e-3
@@ -45,7 +49,19 @@ class TrainConfig:
     device: str = "cpu"
     checkpoint_dir: Path = Path("checkpoints")
     save_every: int = 5
-    pos_weight: float = 10.0  # Handle class imbalance (faults are sparse)
+    # Imbalance: synthetic default; zarr default overridden in train()
+    pos_weight: float = 10.0
+
+    # S2-02: data mode
+    data_mode: str = "synthetic"  # "synthetic" | "zarr"
+    seismic_zarr: Path = Path("data/volve/staged/synthetic.zarr")
+    label_zarr: Path = Path("data/volve/staged/fault_label.zarr")
+    # Zarr-mode patch filtering: keep only patches with ≥ this fault fraction
+    # 0.00003 ≈ 1 fault voxel out of 32³=32768 — ensures every patch has fault signal
+    min_fault_fraction: float = 0.00003
+
+    # S2-05: reproducibility seed
+    seed: int = 42
 
 
 def generate_synthetic_training_data(
@@ -174,32 +190,39 @@ class NumpyPatchDataset(torch.utils.data.Dataset):
         return seismic_t, label_t
 
 
-def compute_metrics(
+def _dice_loss(logits: torch.Tensor, targets: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:
+    """Soft Dice loss — robust to class imbalance without requiring pos_weight tuning."""
+    probs = torch.sigmoid(logits)
+    intersection = (probs * targets).sum()
+    return 1.0 - (2.0 * intersection + smooth) / (probs.sum() + targets.sum() + smooth)
+
+
+def _accum_tp_fp_fn(
     preds: torch.Tensor,
     targets: torch.Tensor,
     threshold: float = 0.5,
-) -> dict[str, float]:
-    """Compute IoU and Dice for binary segmentation."""
+) -> tuple[float, float, float]:
+    """Return (TP, FP, FN) counts for epoch-level metric accumulation (S2-08)."""
     with torch.no_grad():
-        probs = torch.sigmoid(preds)
-        binary = (probs > threshold).float()
+        binary = (torch.sigmoid(preds) > threshold).float()
+        tp = (binary * targets).sum().item()
+        fp = (binary * (1.0 - targets)).sum().item()
+        fn = ((1.0 - binary) * targets).sum().item()
+    return tp, fp, fn
 
-        intersection = (binary * targets).sum()
-        union = binary.sum() + targets.sum() - intersection
 
-        iou = (intersection / (union + 1e-8)).item()
-        dice = (
-            2 * intersection / (binary.sum() + targets.sum() + 1e-8)
-        ).item()
-        precision = (intersection / (binary.sum() + 1e-8)).item()
-        recall = (intersection / (targets.sum() + 1e-8)).item()
+def _epoch_metrics(tp: float, fp: float, fn: float) -> dict[str, float]:
+    """Compute IoU and Dice from epoch-level TP/FP/FN accumulators (S2-08).
 
-    return {
-        "iou": iou,
-        "dice": dice,
-        "precision": precision,
-        "recall": recall,
-    }
+    Accumulating raw counts across batches then computing the ratio once is
+    the correct method for sparse labels — per-batch averaging biases the
+    result toward 0 when most batches contain zero positive labels.
+    """
+    iou = tp / (tp + fp + fn + 1e-8)
+    dice = 2.0 * tp / (2.0 * tp + fp + fn + 1e-8)
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    return {"iou": iou, "dice": dice, "precision": precision, "recall": recall}
 
 
 def train_epoch(
@@ -208,11 +231,12 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
+    use_dice: bool = False,
 ) -> dict[str, float]:
-    """Run one training epoch."""
+    """Run one training epoch with epoch-level metric accumulation (S2-08)."""
     model.train()
     total_loss = 0.0
-    total_metrics: dict[str, float] = {"iou": 0, "dice": 0}
+    total_tp = total_fp = total_fn = 0.0
     n_batches = 0
 
     for seismic, labels in loader:
@@ -222,20 +246,20 @@ def train_epoch(
         optimizer.zero_grad()
         logits = model(seismic)
         loss = criterion(logits, labels)
+        if use_dice:
+            loss = 0.5 * loss + 0.5 * _dice_loss(logits, labels)
         loss.backward()
         optimizer.step()
 
+        tp, fp, fn = _accum_tp_fp_fn(logits, labels)
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
         total_loss += loss.item()
-        metrics = compute_metrics(logits, labels)
-        for k in total_metrics:
-            total_metrics[k] += metrics[k]
         n_batches += 1
 
     avg_loss = total_loss / max(n_batches, 1)
-    avg_metrics = {
-        k: v / max(n_batches, 1) for k, v in total_metrics.items()
-    }
-    return {"loss": avg_loss, **avg_metrics}
+    return {"loss": avg_loss, **_epoch_metrics(total_tp, total_fp, total_fn)}
 
 
 @torch.no_grad()
@@ -244,11 +268,12 @@ def validate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    use_dice: bool = False,
 ) -> dict[str, float]:
-    """Run validation."""
+    """Run validation with epoch-level metric accumulation (S2-08)."""
     model.eval()
     total_loss = 0.0
-    total_metrics: dict[str, float] = {"iou": 0, "dice": 0}
+    total_tp = total_fp = total_fn = 0.0
     n_batches = 0
 
     for seismic, labels in loader:
@@ -257,77 +282,50 @@ def validate(
 
         logits = model(seismic)
         loss = criterion(logits, labels)
+        if use_dice:
+            loss = 0.5 * loss + 0.5 * _dice_loss(logits, labels)
 
+        tp, fp, fn = _accum_tp_fp_fn(logits, labels)
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
         total_loss += loss.item()
-        metrics = compute_metrics(logits, labels)
-        for k in total_metrics:
-            total_metrics[k] += metrics[k]
         n_batches += 1
 
     avg_loss = total_loss / max(n_batches, 1)
-    avg_metrics = {
-        k: v / max(n_batches, 1) for k, v in total_metrics.items()
-    }
-    return {"loss": avg_loss, **avg_metrics}
+    return {"loss": avg_loss, **_epoch_metrics(total_tp, total_fp, total_fn)}
 
 
 def train(config: TrainConfig) -> Path:
     """Main training loop. Returns path to best checkpoint."""
+    # S2-05: Reproducibility — seed everything before any data or model ops
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     device = torch.device(config.device)
     config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Training config: %s", config)
     logger.info("Device: %s", device)
 
-    # Generate or load data
-    data_dir = Path("data/training")
-    vol_path = data_dir / "volume.npy"
-    mask_path = data_dir / "mask.npy"
+    # S2-05: Persist resolved config to disk immediately
+    config_dict = dataclasses.asdict(config)
+    run_config_path = config.checkpoint_dir / "run_config.json"
+    with open(run_config_path, "w") as fh:
+        json.dump(config_dict, fh, indent=2, default=str)
+    logger.info("Run config saved → %s", run_config_path)
 
-    if vol_path.exists() and mask_path.exists():
-        logger.info("Loading existing training data from %s", data_dir)
-        volume = np.load(vol_path)
-        mask = np.load(mask_path)
+    # S2-02: Branch on data mode
+    use_dice = False  # combined BCE+Dice flag
+    if config.data_mode == "zarr":
+        train_loader, val_loader = _build_zarr_loaders(config)
+        use_dice = True  # always use combined loss for real sparse labels
     else:
-        logger.info("Generating synthetic training data...")
-        volume, mask = generate_synthetic_training_data(data_dir)
-
-    # Split: 70% train, 15% val, 15% test (along inline axis)
-    n_il = volume.shape[0]
-    train_end = int(n_il * 0.7)
-    val_end = int(n_il * 0.85)
-
-    train_vol, train_mask = volume[:train_end], mask[:train_end]
-    val_vol, val_mask = volume[train_end:val_end], mask[train_end:val_end]
-
-    logger.info(
-        "Split: train=%d, val=%d, test=%d inlines",
-        train_end, val_end - train_end, n_il - val_end,
-    )
-
-    train_ds = NumpyPatchDataset(
-        train_vol, train_mask, config.patch_size, config.stride
-    )
-    val_ds = NumpyPatchDataset(
-        val_vol, val_mask, config.patch_size, config.stride
-    )
-
-    logger.info(
-        "Train patches: %d, Val patches: %d", len(train_ds), len(val_ds)
-    )
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=0,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=0,
-    )
+        train_loader, val_loader = _build_synthetic_loaders(config)
 
     # Build model
     from deepseismic.models.unet import build_model
@@ -351,13 +349,15 @@ def train(config: TrainConfig) -> Path:
         optimizer, T_max=config.epochs
     )
 
-    # Weighted BCE for class imbalance
     pos_weight = torch.tensor([config.pos_weight], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     # Training loop
     best_val_iou = 0.0
     best_checkpoint = config.checkpoint_dir / "best.pt"
+
+    # Val metrics from last epoch (used for final checkpoint save below loop)
+    val_metrics: dict[str, float] = {}
 
     print(
         f"\n{'Epoch':>5} {'Train Loss':>11} {'Val Loss':>9} "
@@ -368,9 +368,9 @@ def train(config: TrainConfig) -> Path:
 
     for epoch in range(1, config.epochs + 1):
         train_metrics = train_epoch(
-            model, train_loader, optimizer, criterion, device
+            model, train_loader, optimizer, criterion, device, use_dice=use_dice
         )
-        val_metrics = validate(model, val_loader, criterion, device)
+        val_metrics = validate(model, val_loader, criterion, device, use_dice=use_dice)
         scheduler.step()
 
         lr = scheduler.get_last_lr()[0]
@@ -384,13 +384,18 @@ def train(config: TrainConfig) -> Path:
             f"{lr:>10.2e}"
         )
 
-        # Save best
+        # Save best checkpoint with REAL metrics (S2-08) + config+seed (S2-05)
         if val_metrics["iou"] > best_val_iou:
             best_val_iou = val_metrics["iou"]
+            ckpt_payload = {
+                **val_metrics,
+                "seed": config.seed,
+                "train_config": config_dict,
+            }
             model.save_checkpoint(
                 str(best_checkpoint),
                 epoch=epoch,
-                metrics=val_metrics,
+                metrics=ckpt_payload,
             )
 
         # Periodic save
@@ -400,17 +405,161 @@ def train(config: TrainConfig) -> Path:
                 str(ckpt), epoch=epoch, metrics=val_metrics
             )
 
-    # Save final
+    # Save final checkpoint
     final_ckpt = config.checkpoint_dir / "latest.pt"
+    final_payload = {
+        **val_metrics,
+        "seed": config.seed,
+        "train_config": config_dict,
+    }
     model.save_checkpoint(
-        str(final_ckpt), epoch=config.epochs, metrics=val_metrics
+        str(final_ckpt), epoch=config.epochs, metrics=final_payload
     )
 
     print(f"\nTraining complete. Best val IoU: {best_val_iou:.4f}")
     print(f"   Best checkpoint: {best_checkpoint}")
     print(f"   Latest checkpoint: {final_ckpt}")
+    print(f"   Run config: {run_config_path}")
 
     return best_checkpoint
+
+
+# ---------------------------------------------------------------------------
+# Data loader builders
+# ---------------------------------------------------------------------------
+
+
+def _build_zarr_loaders(
+    config: TrainConfig,
+) -> tuple[DataLoader, DataLoader]:
+    """Build train/val DataLoaders from Zarr amplitude + fault_label volumes.
+
+    Class-imbalance strategy for 0.08% fault fraction (S2-02):
+    - All patches included (min_fault_fraction=0) so the model sees background.
+    - Fault-containing patches are oversampled 50× via WeightedRandomSampler
+      so every training batch contains at least one fault patch in expectation.
+    - BCEWithLogitsLoss(pos_weight=200) + soft Dice loss (combined 50/50):
+        * BCE pos_weight=200 (≤ capped neg/pos ratio ~1255) penalises missed faults.
+        * Dice loss adds precision pressure — penalises predicting fault everywhere.
+    This combination avoids the all-positive collapse from BCE-only high pos_weight
+    while still driving recall on the sparse fault class.
+    """
+    from torch.utils.data import WeightedRandomSampler
+
+    from deepseismic.preprocessing.patches import PatchConfig, PatchDataset, Split
+
+    patch_cfg = PatchConfig(
+        patch_size=config.patch_size,
+        stride=config.stride,
+        min_fault_fraction=0.0,  # include ALL patches (negative + positive)
+    )
+
+    train_ds = PatchDataset(
+        config.seismic_zarr,
+        config.label_zarr,
+        config=patch_cfg,
+        split=Split.TRAIN,
+    )
+    val_ds = PatchDataset(
+        config.seismic_zarr,
+        config.label_zarr,
+        config=patch_cfg,
+        split=Split.VAL,
+    )
+
+    if len(train_ds) == 0:
+        raise RuntimeError(
+            "No training patches found. Check zarr paths and volume size."
+        )
+
+    # Build fault-aware sampling weights: scan label zarr for each train patch.
+    # Fault patches get 50× weight → ~1-2 fault patches per batch of 4 on average.
+    import zarr as _zarr
+    _label_root = _zarr.open_group(str(config.label_zarr), mode="r")
+    _fault_arr = _label_root["fault_mask"]
+    ps = config.patch_size
+
+    sample_weights: list[float] = []
+    n_fault_patches = 0
+    for p in train_ds._patches:
+        lbl_sum = int(
+            _fault_arr[
+                p.il_start : p.il_start + ps[0],
+                p.xl_start : p.xl_start + ps[1],
+                p.s_start  : p.s_start  + ps[2],
+            ].sum()
+        )
+        if lbl_sum > 0:
+            sample_weights.append(50.0)
+            n_fault_patches += 1
+        else:
+            sample_weights.append(1.0)
+
+    logger.info(
+        "Zarr loaders — train=%d patches (%d with fault), val=%d patches",
+        len(train_ds), n_fault_patches, len(val_ds),
+    )
+    logger.info(
+        "WeightedRandomSampler: fault patches weight=50, background weight=1"
+    )
+
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=min(200, len(sample_weights)),  # 50 batches/epoch on CPU
+        replacement=True,
+    )
+
+    train_loader = DataLoader(
+        train_ds, batch_size=config.batch_size, sampler=sampler, num_workers=0
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=config.batch_size, shuffle=False, num_workers=0
+    )
+    return train_loader, val_loader
+
+
+def _build_synthetic_loaders(
+    config: TrainConfig,
+) -> tuple[DataLoader, DataLoader]:
+    """Build train/val DataLoaders from synthetic numpy data (backward compat)."""
+    data_dir = Path("data/training")
+    vol_path = data_dir / "volume.npy"
+    mask_path = data_dir / "mask.npy"
+
+    if vol_path.exists() and mask_path.exists():
+        logger.info("Loading existing training data from %s", data_dir)
+        volume = np.load(vol_path)
+        mask = np.load(mask_path)
+    else:
+        logger.info("Generating synthetic training data...")
+        volume, mask = generate_synthetic_training_data(data_dir)
+
+    n_il = volume.shape[0]
+    train_end = int(n_il * 0.7)
+    val_end = int(n_il * 0.85)
+
+    logger.info(
+        "Split: train=%d, val=%d, test=%d inlines",
+        train_end, val_end - train_end, n_il - val_end,
+    )
+
+    train_ds = NumpyPatchDataset(
+        volume[:train_end], mask[:train_end], config.patch_size, config.stride
+    )
+    val_ds = NumpyPatchDataset(
+        volume[train_end:val_end], mask[train_end:val_end],
+        config.patch_size, config.stride,
+    )
+
+    logger.info("Train patches: %d, Val patches: %d", len(train_ds), len(val_ds))
+
+    train_loader = DataLoader(
+        train_ds, batch_size=config.batch_size, shuffle=True, num_workers=0
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=config.batch_size, shuffle=False, num_workers=0
+    )
+    return train_loader, val_loader
 
 
 def main() -> None:
@@ -442,6 +591,33 @@ def main() -> None:
         "--resume", type=str, default=None,
         help="Resume from checkpoint path",
     )
+    # S2-02: data mode
+    parser.add_argument(
+        "--data-mode", choices=["synthetic", "zarr"], default="synthetic",
+        help="Data source: synthetic (default) or zarr (real Volve data)",
+    )
+    parser.add_argument(
+        "--seismic-zarr", default="data/volve/staged/synthetic.zarr",
+        help="Path to seismic amplitude Zarr store (zarr mode only)",
+    )
+    parser.add_argument(
+        "--label-zarr", default="data/volve/staged/fault_label.zarr",
+        help="Path to fault label Zarr store (zarr mode only)",
+    )
+    parser.add_argument(
+        "--pos-weight", type=float, default=None,
+        help="BCE pos_weight for class imbalance. "
+             "Defaults: synthetic=10, zarr=200 (capped neg/pos ratio)",
+    )
+    # S2-05: seed
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
+    parser.add_argument(
+        "--checkpoint-dir", default="checkpoints",
+        help="Directory for checkpoints and run_config.json",
+    )
 
     args = parser.parse_args()
 
@@ -450,12 +626,27 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # Default pos_weight depends on data mode
+    # zarr: neg/pos ≈ 1255, capped at 200 to avoid numeric instability
+    if args.pos_weight is not None:
+        pos_weight = args.pos_weight
+    elif args.data_mode == "zarr":
+        pos_weight = 200.0
+    else:
+        pos_weight = 10.0
+
     config = TrainConfig(
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
         device=args.device,
         init_features=args.features,
+        data_mode=args.data_mode,
+        seismic_zarr=Path(args.seismic_zarr),
+        label_zarr=Path(args.label_zarr),
+        pos_weight=pos_weight,
+        seed=args.seed,
+        checkpoint_dir=Path(args.checkpoint_dir),
     )
 
     train(config)

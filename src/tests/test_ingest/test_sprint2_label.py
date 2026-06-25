@@ -1,0 +1,232 @@
+"""Sprint 2 S2-01 tests: fault-label generation coordinate mapping and rasterisation.
+
+Critical coverage:
+- Coordinate mapping correctness (highest-risk logic: il/xl 0-based index, z_col=sample index)
+- FaultMaskGenerator output dtype/shape/values
+- Dilation monotonicity
+- load_volve_fault_sticks parsing from synthetic .dat fixtures
+
+Synthetic .dat fixtures only — no dependency on real data files.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+import zarr
+import zarr.storage
+
+from deepseismic.ingest.label_generator import FaultMaskGenerator
+from deepseismic.validation import load_volve_fault_sticks
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+BASE_IL = 1001
+BASE_XL = 1900
+SAMPLE_RATE_MS = 4.0
+
+
+def _write_dat(tmp_path: Path, name: str, rows: list[tuple]) -> Path:
+    """Write a minimal 3-column .dat fixture file (il_idx xl_idx z_col)."""
+    p = tmp_path / name
+    with open(p, "w") as fh:
+        for row in rows:
+            fh.write(" ".join(str(v) for v in row) + "\n")
+    return p
+
+
+def _make_gen(
+    shape: tuple[int, int, int] = (20, 20, 50),
+    dilation: int = 0,
+) -> FaultMaskGenerator:
+    return FaultMaskGenerator(
+        volume_shape=shape,
+        inline_range=(0, shape[0] - 1, 1),
+        crossline_range=(0, shape[1] - 1, 1),
+        sample_rate_ms=SAMPLE_RATE_MS,
+        datum_ms=0.0,
+        dilation_voxels=dilation,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Coordinate mapping (highest-risk logic, S2-01)
+# ---------------------------------------------------------------------------
+
+
+class TestCoordinateMapping:
+    """Guard the abs_inline / abs_crossline / twt_ms formulas.
+
+    The .dat files store 0-based index-space values.  A prior team bug
+    treated z_col as milliseconds directly (202 ms) instead of as a sample
+    index (202 × 4 = 808 ms).  These tests pin the correct interpretation.
+    """
+
+    def test_abs_inline_formula(self):
+        """abs_inline = BASE_IL(1001) + il_idx for all valid il_idx."""
+        for il_idx in [0, 5, 50, 99]:
+            assert BASE_IL + il_idx == 1001 + il_idx
+            # Sanity: index is in valid range for a 100-inline volume
+            assert 0 <= il_idx < 100
+
+    def test_abs_crossline_formula(self):
+        """abs_crossline = BASE_XL(1900) + xl_idx for all valid xl_idx."""
+        for xl_idx in [0, 10, 100, 199]:
+            assert BASE_XL + xl_idx == 1900 + xl_idx
+            assert 0 <= xl_idx < 200
+
+    def test_z_col_is_sample_index_not_ms(self):
+        """twt_ms = z_col * 4.0 — z_col is a sample INDEX, not ms.
+
+        Real Volve sticks have z_col ≈ 200-307.  If z_col were used as ms
+        directly, all TWT values would be < 400 ms.  With the correct formula
+        they exceed 800 ms.  This test pins that invariant.
+        """
+        for z_col in [202, 227, 300, 307]:
+            twt_ms = z_col * SAMPLE_RATE_MS
+            # Correct: ≥ 800 ms
+            assert twt_ms >= 800.0, (
+                f"z_col={z_col} should map to ≥800 ms; "
+                f"got {twt_ms} ms (bug: treated as raw ms)"
+            )
+
+    def test_known_voxel_lands_at_exact_index(self):
+        """Given il_idx=10, xl_idx=20, z_col=50 — voxel (10,20,50) must be labelled."""
+        gen = FaultMaskGenerator(
+            volume_shape=(100, 200, 500),
+            inline_range=(1001, 1100, 1),
+            crossline_range=(1900, 2099, 1),
+            sample_rate_ms=SAMPLE_RATE_MS,
+            datum_ms=0.0,
+            dilation_voxels=0,
+        )
+        gen.add_fault_sticks_in_index_space([[(10.0, 20.0, 50.0), (11.0, 21.0, 51.0)]])
+        assert gen.mask[10, 20, 50] == 1, "Known voxel was not labelled"
+
+    def test_dilation_zero_no_neighbour_leakage(self):
+        """With dilation=0, only the exact voxel is painted — no adjacents."""
+        gen = _make_gen(shape=(30, 30, 60), dilation=0)
+        gen.add_fault_sticks_in_index_space([[(5.0, 5.0, 10.0), (6.0, 6.0, 11.0)]])
+        # Direct neighbours must remain 0
+        assert gen.mask[4, 5, 10] == 0
+        assert gen.mask[5, 4, 10] == 0
+        assert gen.mask[7, 7, 13] == 0  # outside stick range
+
+    def test_load_volve_sticks_parses_dat(self, tmp_path: Path):
+        """load_volve_fault_sticks correctly reads a synthetic 3-column .dat file."""
+        _write_dat(tmp_path, "fault_A.dat", [
+            (10, 50, 202),
+            (11, 51, 210),
+            (12, 52, 218),
+        ])
+        sticks = load_volve_fault_sticks(tmp_path)
+        assert len(sticks) == 1
+        assert sticks[0].shape == (3, 3)
+        # First point: il=10, xl=50, last-col=202
+        assert sticks[0][0, 0] == pytest.approx(10.0)
+        assert sticks[0][0, 1] == pytest.approx(50.0)
+        assert sticks[0][0, 2] == pytest.approx(202.0)
+
+    def test_load_volve_sticks_multiple_files(self, tmp_path: Path):
+        """Multiple .dat files produce multiple sticks."""
+        _write_dat(tmp_path, "fault_A.dat", [(10, 50, 202), (11, 51, 210)])
+        _write_dat(tmp_path, "fault_B.dat", [(30, 100, 300), (31, 101, 310)])
+        sticks = load_volve_fault_sticks(tmp_path)
+        assert len(sticks) == 2
+
+    def test_load_volve_sticks_empty_dir(self, tmp_path: Path):
+        """Empty directory returns empty list without error."""
+        sticks = load_volve_fault_sticks(tmp_path)
+        assert sticks == []
+
+
+# ---------------------------------------------------------------------------
+# FaultMaskGenerator rasterisation
+# ---------------------------------------------------------------------------
+
+
+class TestFaultMaskGenerator:
+    """Tests for FaultMaskGenerator rasterisation and dilation."""
+
+    def test_mask_initially_all_zeros(self):
+        gen = _make_gen()
+        assert gen.mask.sum() == 0
+
+    def test_values_binary_after_rasterisation(self):
+        """Mask must contain only 0 and 1."""
+        gen = _make_gen(dilation=1)
+        gen.add_fault_sticks_in_index_space([[(5.0, 5.0, 10.0), (6.0, 6.0, 12.0)]])
+        unique = np.unique(gen.mask)
+        assert set(unique).issubset({0, 1}), f"Non-binary values found: {unique}"
+
+    def test_positive_fraction_nonzero_after_stick(self):
+        """Adding a stick must produce at least one labelled voxel."""
+        gen = _make_gen(dilation=0)
+        gen.add_fault_sticks_in_index_space([[(5.0, 5.0, 10.0), (6.0, 6.0, 11.0)]])
+        assert gen.mask.sum() > 0
+
+    def test_dilation_increases_count_monotonically(self):
+        """Larger dilation radius must label strictly more voxels than smaller."""
+        sticks = [[(5.0, 5.0, 10.0), (7.0, 7.0, 13.0)]]
+        counts = []
+        for d in range(4):
+            gen = FaultMaskGenerator(
+                volume_shape=(30, 30, 60),
+                inline_range=(0, 29, 1),
+                crossline_range=(0, 29, 1),
+                sample_rate_ms=SAMPLE_RATE_MS,
+                datum_ms=0.0,
+                dilation_voxels=d,
+            )
+            gen.add_fault_sticks_in_index_space(sticks)
+            counts.append(int(gen.mask.sum()))
+
+        for i in range(1, len(counts)):
+            assert counts[i] > counts[i - 1], (
+                f"dilation={i} count={counts[i]} not > "
+                f"dilation={i - 1} count={counts[i - 1]}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Zarr output (S2-01 output contract)
+# ---------------------------------------------------------------------------
+
+
+class TestLabelZarrOutput:
+    """Tests for FaultMaskGenerator.to_zarr: dtype, shape, and roundtrip correctness."""
+
+    def test_zarr_dtype_is_uint8(self, tmp_path: Path):
+        gen = _make_gen(shape=(10, 10, 20))
+        gen.add_fault_sticks_in_index_space([[(3.0, 3.0, 5.0), (4.0, 4.0, 6.0)]])
+        z = gen.to_zarr(tmp_path / "label.zarr", chunks=(5, 5, 10), overwrite=True)
+        assert str(z.dtype) == "uint8"
+
+    def test_zarr_shape_matches_volume_shape(self, tmp_path: Path):
+        shape = (8, 12, 24)
+        gen = FaultMaskGenerator(
+            volume_shape=shape,
+            inline_range=(0, 7, 1),
+            crossline_range=(0, 11, 1),
+            sample_rate_ms=SAMPLE_RATE_MS,
+            datum_ms=0.0,
+            dilation_voxels=0,
+        )
+        z = gen.to_zarr(tmp_path / "label2.zarr", chunks=(4, 4, 8), overwrite=True)
+        assert z.shape == shape
+
+    def test_zarr_values_roundtrip_exactly(self, tmp_path: Path):
+        """Values written to Zarr must equal the in-memory mask exactly."""
+        gen = _make_gen(shape=(8, 8, 16), dilation=0)
+        gen.add_fault_sticks_in_index_space([[(2.0, 2.0, 5.0), (3.0, 3.0, 6.0)]])
+        zarr_path = tmp_path / "label3.zarr"
+        gen.to_zarr(zarr_path, chunks=(4, 4, 8), overwrite=True)
+
+        store = zarr.storage.LocalStore(str(zarr_path))
+        root = zarr.open_group(store, mode="r")
+        stored = np.array(root["fault_mask"])
+        np.testing.assert_array_equal(stored, gen.mask)

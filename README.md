@@ -21,7 +21,7 @@ DeepSeismic2 addresses that gap by combining:
 
 - Ingest a constrained subset of the Equinor Volve dataset
 - Convert seismic data into analysis-friendly formats for downstream processing
-- Run a baseline interpretation workflow using a UNet-style model
+- Run baseline binary fault detection using a 3D UNet model trained on real fault-stick labels
 - Expose metadata, run status, and result discovery through an API
 - Enable an AI-native analyst workflow with domain grounding for geophysics, geology, and geoengineering perspectives
 
@@ -102,12 +102,71 @@ python -m ruff check src/               # linting
 
 ## Status
 
-**Sprint 1 complete.** Full end-to-end pipeline implemented:
+**Sprint 2 complete — real-data training and evaluation implemented.**
+
+The core ML loop is now real: UNet3D is trained on genuine Volve fault-stick labels
+rasterized from field interpretation data, and evaluation runs against a held-out
+volume region with non-degenerate metrics. This is **binary fault detection** on
+Volve — a different task from the reference microsoft/seismic-deeplearning project
+(which does multi-class facies segmentation on F3/Penobscot). See
+[docs/task-framing.md](docs/task-framing.md) for the full rationale.
+
+### What's real vs. what's demo
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| SEG-Y → Zarr ingest | ✅ Real | Parses actual Volve ST10010 geometry |
+| Fault label generation | ✅ Real | 18 fault-stick points from two Volve `.dat` files, rasterized at dilation=3 |
+| UNet3D training on real labels | ✅ Real | `--data-mode zarr`, seed=42, `run_config.json` persisted |
+| Evaluation with real metrics | ✅ Real | `scripts/evaluate.py` → `output/eval_metrics.json` |
+| QC / signal conditioning stage | ✅ Real | Dominant freq, λ/4 resolution, zero-phase check, amplitude-preserving normalisation |
+| Sliding-window inference engine | ✅ Real | Gaussian overlap-blending, CPU and CUDA |
+| FastAPI backend (13 endpoints) | ✅ Real code | **Defaults to mock mode** (`DEEPSEISMIC_MOCK_MODE=true`); real-mode integration path not fully tested |
+| Foundry agent (11 tools) | ✅ Real code | **Defaults to mock mode** (`MOCK_LLM=true`); real API calls work when `false` |
+| Amplitude volume | ⚠️ Synthetic stand-in | Ricker-wavelet synthetic approximating Volve ST10010 geometry — **not** actual ST10010 amplitudes |
+| Fault labels | ⚠️ Sparse | 18 points → 0.08% positive voxel fraction; adequate for pipeline validation, not a full interpretation |
+| Demo UIs | ℹ️ Pre-baked | Streamlit / Gradio visualise pre-baked inference results from `fault_prob.zarr` |
+
+### Results (Sprint 2, seed=42)
+
+Trained on the synthetic amplitude stand-in with real Volve fault-stick labels.
+20 epochs, CPU, 32³ patches, WeightedRandomSampler + combined BCE/Dice loss.
+
+| Metric | Validation (patches, epoch 18) | Full-volume held-out (il 64–100) |
+|--------|-------------------------------|----------------------------------|
+| IoU | 0.047 | 0.062 |
+| Dice / F1 | 0.089 | 0.117 |
+| Tolerant recall (±5 vox) | — | 0.84 |
+| Precision | 0.049 | 0.068 |
+
+**Honest caveat:** These numbers show the pipeline runs end-to-end on real labels and
+produces non-degenerate output. They are **not** a geophysical skill benchmark. Two
+factors limit their interpretive weight: (1) the amplitude volume is a synthetic
+stand-in, not actual Volve seismic; (2) only 18 fault-stick points were available,
+making the label set extremely sparse. Results will differ substantially when run
+against the full Volve ST10010 post-stack volume with a complete interpretation.
+Reproducibility: seed=42, run config persisted at `checkpoints/run_config.json`.
+
+### Reproduce the real pipeline
+
+```powershell
+# 1. Generate fault labels from the real Volve fault sticks
+python scripts/generate_fault_label.py
+
+# 2. Train on real labels
+#    Requires: data/volve/staged/synthetic.zarr + data/volve/staged/fault_label.zarr
+python -m deepseismic.training.train --data-mode zarr --epochs 20
+
+# 3. Evaluate on the held-out volume region
+python scripts/evaluate.py --checkpoint checkpoints/best.pt
+#    Writes metrics to output/eval_metrics.json
+```
+
+### Also implemented (Sprint 1)
+
 - ✅ SEG-Y ingest → Zarr conversion with metadata sidecars
-- ✅ Fault label generation from existing interpretations
-- ✅ 3D UNet model with sliding-window inference
 - ✅ FastAPI backend (13 endpoints, mock mode supported)
 - ✅ Foundry agent with 11 tools wired to real API
 - ✅ Three demo UIs: terminal chat, Streamlit, Gradio
-- ✅ 79 tests passing + CI workflow
+- ✅ 156 tests passing + CI workflow
 - ✅ Local dev environment (Azurite, Docker, zero-config)

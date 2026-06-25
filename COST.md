@@ -15,15 +15,17 @@ Tracks the AI/LLM costs incurred during development — model calls, agent spawn
 | 2026-06-09 | Sprint 1 build | Dallas (sonnet), Parker (sonnet), Lambert (sonnet), Hudson (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$4.50 | Full ingest pipeline, UNet, agent+3 UIs, storage client, 79 tests, CI |
 | 2026-06-10 | Data acquisition | Dallas (sonnet), Scribe (haiku) | claude-sonnet-4.6, claude-haiku-4.5 | ~$0.90 | Volve data guide, download scripts, Databricks export, real notebook |
 | 2026-06-10 | Azure deploy & live app | Opus (coordinator), general-purpose agents | claude-opus-4.6, claude-sonnet-4.6 | ~$6.50 | 8 infra fixes, architecture diagrams, ACR builds, data upload, 2 Container Apps live, OpenAI wired |
+| 2026-06-24 | Process-fidelity evaluation | Ash, Dallas (sonnet), Ripley (opus), Scribe (haiku) | claude-opus-4.8 (coord), claude-sonnet-4.6, claude-opus-4.6, claude-haiku-4.5 | ~$3.00 | Gap analysis vs microsoft/seismic-deeplearning: synthetic-only training, circular validation, mocked critical path identified |
+| 2026-06-24 | Sprint 2 build (real loop) | Dallas×2, Ash×2, Hudson, Ripley (sonnet/opus), Scribe (haiku) | claude-opus-4.8 (coord), claude-sonnet-4.6, claude-haiku-4.5 | ~$6.50 | Real-label training wired, real metrics (eval IoU 0.062, tol recall±5 0.84), QC stage, 53 new tests (211 total), README honesty, zero-phase bug fixed, issues #6-#12 |
 
 ### Cumulative Totals
 
 | Metric | Value |
 |--------|-------|
-| **Total sessions** | 7 |
-| **Total agent spawns** | 20+ (Dallas×2, Parker×3, Lambert×2, Ripley×2, Hudson, Ash, Kane, Scribe×4, general-purpose×3) |
-| **Estimated total AI cost** | ~$15.05 |
-| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 79 tests, CI, infra repo, data acquisition guide, download scripts, 2 architecture diagrams, 2 Dockerfiles, live Azure deployment |
+| **Total sessions** | 9 |
+| **Total agent spawns** | 33+ (Dallas×6, Parker×3, Lambert×2, Ripley×5, Hudson×2, Ash×5, Kane, Scribe×6, general-purpose×3) |
+| **Estimated total AI cost** | ~$24.55 |
+| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 211 tests, CI, infra repo, data acquisition guide, download scripts, 2 architecture diagrams, 2 Dockerfiles, live Azure deployment, process-fidelity gap analysis, real-label training pipeline + evaluation, QC/conditioning stage, task-framing doc, Sprint 3 backlog (#6-#12) |
 
 ### Cost Notes
 

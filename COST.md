@@ -19,15 +19,16 @@ Tracks the AI/LLM costs incurred during development — model calls, agent spawn
 | 2026-06-24 | Sprint 2 build (real loop) | Dallas×2, Ash×2, Hudson, Ripley (sonnet/opus), Scribe (haiku) | claude-opus-4.8 (coord), claude-sonnet-4.6, claude-haiku-4.5 | ~$6.50 | Real-label training wired, real metrics (eval IoU 0.062, tol recall±5 0.84), QC stage, 53 new tests (211 total), README honesty, zero-phase bug fixed, issues #6-#12 |
 | 2026-06-25 | Sprint 3 (de-mock + real-data readiness) | Parker×2, Lambert, Dallas, Ash, Hudson, Ripley (sonnet), Scribe (haiku) | claude-opus-4.8 (coord), claude-sonnet-4.6, claude-haiku-4.5 | ~$5.50 | De-mocked API+agent (fail-loud 503/RuntimeError), ST10010-ready ingest, ADLS train/eval, densified labels (0.30% synthetic proxy), 69 new tests (292 total) + BUG-1 fix, real-data runbook, v0.4.0 release; P1 #9 done, #7/#8 app-ready (deploy-gated) |
 | 2026-06-25 | Real ST10010 ingest (first real data) | Dallas (sonnet, interrupted by reboot), coordinator recovery | claude-opus-4.8 (coord), claude-sonnet-4.6 | ~$1.50 | Ingested REAL Volve ST10010 full-stack PSDM → staged/surveys/volve-st10010/amplitude.zarr (IL 9961-10361, XL 1961-2680, 850×4ms, verified readable); resumed/repaired interrupted upload; #7 ingest-half done (training/eval blocked on real labels) |
+| 2026-06-25 | Triage #13 + UI live-inference wiring | Opus (coordinator inline) | claude-opus-4.8 | ~$2.00 | Triaged #13: root-caused "always placeholder" to Gradio client bugs (hardcoded survey_id, wrong inline range, silent except-pass), filed #17/#18; built fix — gradio-free fail-loud _viewer_api.py, survey picker + metadata-driven inline range + real fault overlay + live UNet3D trigger, 22 new tests (314 total), v0.5.0 release |
 
 ### Cumulative Totals
 
 | Metric | Value |
 |--------|-------|
-| **Total sessions** | 11 |
+| **Total sessions** | 12 |
 | **Total agent spawns** | 41+ (Dallas×8, Parker×5, Lambert×3, Ripley×6, Hudson×3, Ash×6, Kane, Scribe×7, general-purpose×3) |
-| **Estimated total AI cost** | ~$31.55 |
-| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 292 tests, CI, infra repo, data acquisition guide, download scripts, 2 architecture diagrams, 2 Dockerfiles, live Azure deployment, process-fidelity gap analysis, real-label training pipeline + evaluation, QC/conditioning stage, task-framing doc, de-mocked fail-loud API+agent, ADLS-backed train/eval, ST10010-ready ingest CLI, real-data runbook, Sprint 3 backlog (#6-#12) |
+| **Estimated total AI cost** | ~$33.55 |
+| **Artifacts produced** | 2 design docs, 8 charters, full code scaffold, ingest pipeline, UNet, Foundry agent, 3 UIs, storage client, 314 tests, CI, infra repo, data acquisition guide, download scripts, 2 architecture diagrams, 2 Dockerfiles, live Azure deployment, process-fidelity gap analysis, real-label training pipeline + evaluation, QC/conditioning stage, task-framing doc, de-mocked fail-loud API+agent, ADLS-backed train/eval, ST10010-ready ingest CLI, real-data runbook, gradio-free viewer API client + live UNet3D inference UI, Sprint 3 backlog (#6-#12), demo-fidelity backlog (#13-#18) |
 
 ### Cost Notes
 
@@ -120,3 +121,4 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 | 2026-06-10 | Added Azure deploy session ($6.50); actual Azure spend ($1.87 day 1); revised AI Search to $49/mo (actual Basic SKU pricing); live endpoints confirmed |
 | 2026-06-25 | Added Sprint 3 session ($5.50): de-mock + real-data readiness, v0.4.0 release; updated cumulative totals (10 sessions, ~$30.05) |
 | 2026-06-25 | Added real ST10010 ingest session ($1.50): first real Volve data ingested to staged; cumulative 11 sessions, ~$31.55 |
+| 2026-06-25 | Added #13 triage + UI live-inference session ($2.00): fixed Gradio placeholder-fallback bugs (#17/#18), live UNet3D trigger, v0.5.0 release; cumulative 12 sessions, ~$33.55 |

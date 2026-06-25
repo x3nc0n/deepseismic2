@@ -27,14 +27,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 
+from deepseismic.ui import _viewer_api as vapi
+from deepseismic.ui._viewer_api import ViewerAPIError
+
 matplotlib.use("Agg")  # Non-interactive backend for server rendering
 
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
-API_BASE_URL: str = (
-    os.environ.get("API_BASE_URL")
-    or os.environ.get("DEEPSEISMIC_API_URL")
-    or os.environ.get("BACKEND_URL")
-    or "http://localhost:8000"
+API_BASE_URL: str = vapi.api_base_url()
+
+# Default checkpoint blob in the 'features' container for live inference.
+CHECKPOINT_BLOB: str = os.environ.get(
+    "DEEPSEISMIC_CHECKPOINT_BLOB", "checkpoints/unet3d_best.pt"
 )
 
 # ---------------------------------------------------------------------------
@@ -98,92 +101,115 @@ def _get_project_choices(container: str, prefix: str = "") -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Seismic rendering — reads from API or falls back to synthetic
+# Seismic rendering — real API data (fail-loud); synthetic only in demo mode
 # ---------------------------------------------------------------------------
 
-def _fetch_inline_from_api(survey_id: str, inline: int) -> dict | None:
-    """Fetch inline slice data from the API. Returns None on failure."""
-    import requests
-    try:
-        resp = requests.get(
-            f"{API_BASE_URL}/api/surveys/{survey_id}/inline/{inline}",
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
-    return None
+_FAULT_CMAP = LinearSegmentedColormap.from_list(
+    "fault", ["#ff000000", "#ff6600cc", "#ffdd00ee"], N=256
+)
+
+
+def _error_image(message: str, dpi: int = 120) -> bytes:
+    """Render a dark placeholder image carrying a visible error message."""
+    fig, ax = plt.subplots(figsize=(8, 5), facecolor="#0d1520", dpi=dpi)
+    ax.set_facecolor("#0d1520")
+    ax.axis("off")
+    ax.text(
+        0.5, 0.5, f"⚠️ {message}",
+        ha="center", va="center", color="#fca5a5", fontsize=11, wrap=True,
+        transform=ax.transAxes,
+    )
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
 def _render_section_image(
     inline: int,
+    survey_id: str,
+    *,
     show_fault_overlay: bool = True,
-    survey_id: str = "volve",
+    demo_mode: bool = False,
+    run_id: str | None = None,
+    geom: vapi.SurveyGeometry | None = None,
     dpi: int = 120,
-) -> bytes:
-    """Render a seismic inline section as PNG bytes.
+) -> tuple[bytes, str]:
+    """Render a seismic inline section as ``(png_bytes, status_markdown)``.
 
-    Tries to load real data from the API first; falls back to synthetic
-    placeholder if no ingested data is available.
+    Real-data path is the default and **fails loud**: on any API error the image
+    shows the error and the status string explains it — it does NOT silently draw
+    synthetic data.  Synthetic rendering happens only when ``demo_mode`` is set.
     """
-    api_data = _fetch_inline_from_api(survey_id, inline)
-
-    if api_data and api_data.get("amplitude"):
-        # Real data path
-        amplitude = np.array(api_data["amplitude"], dtype=np.float32)
-        crosslines = api_data.get("crossline_coords", list(range(amplitude.shape[1])))
-        twtt = api_data.get("twtt_ms", list(range(amplitude.shape[0])))
-        title_suffix = f"{survey_id} survey"
-        extent = [min(crosslines), max(crosslines), max(twtt), min(twtt)]
-    else:
-        # Synthetic fallback
+    if demo_mode:
         amplitude, extent, title_suffix = _generate_synthetic_section(inline)
+        disp = amplitude
+        is_real = "synthetic demo"
+        status = "🟡 **Demo (synthetic) mode** — not real survey data."
+    else:
+        try:
+            payload = vapi.fetch_inline(survey_id, inline, API_BASE_URL)
+        except ViewerAPIError as exc:
+            msg = str(exc)
+            return _error_image(msg, dpi), f"🔴 **Live data error:** {msg}"
+        amp = np.array(payload["amplitude"], dtype=np.float32)  # (n_xl, n_s)
+        disp = amp.T  # -> (n_s, n_xl): time on y, crossline on x
+        crosslines = payload.get("crossline_coords") or list(range(amp.shape[0]))
+        twtt = payload.get("twtt_ms") or list(range(amp.shape[1]))
+        extent = [min(crosslines), max(crosslines), max(twtt), min(twtt)]
+        title_suffix = f"{survey_id}"
+        is_real = "real data"
+        status = (
+            f"🟢 **Live** — inline {inline} from `{survey_id}` "
+            f"({disp.shape[1]}×{disp.shape[0]})."
+        )
 
-    # Normalize for display
-    amax = np.abs(amplitude).max()
-    if amax > 1e-9:
-        amplitude = amplitude / amax
+    # Robust amplitude scaling (real seismic has a wide dynamic range)
+    vlim = float(np.percentile(np.abs(disp), 99)) or 1.0
 
-    # Plot
     fig, ax = plt.subplots(figsize=(8, 5), facecolor="#0d1520", dpi=dpi)
     ax.set_facecolor("#0d1520")
-
     ax.imshow(
-        amplitude,
+        disp,
         aspect="auto",
         cmap="RdBu_r",
-        vmin=-0.8,
-        vmax=0.8,
+        vmin=-vlim,
+        vmax=vlim,
         interpolation="bilinear",
         extent=extent,
     )
 
-    if show_fault_overlay and not api_data:
-        # Only show synthetic fault overlay when using fake data
-        n_samples, n_crosslines = amplitude.shape
-        mask = np.zeros_like(amplitude)
+    overlay_note = ""
+    if show_fault_overlay and demo_mode:
+        # Synthetic illustrative overlay — demo only.
+        n_samples, n_crosslines = disp.shape
+        mask = np.zeros_like(disp)
         xl_fault = int(n_crosslines * 0.37 + (inline - 1000) * 0.03)
         xl_fault = max(5, min(n_crosslines - 5, xl_fault))
         for xl in range(max(0, xl_fault - 8), min(n_crosslines, xl_fault + 8)):
             prob = 1.0 - abs(xl - xl_fault) / 9.0
             mask[int(n_samples * 0.4):, xl] = np.clip(prob * 0.85, 0, 1)
-        fault_cmap = LinearSegmentedColormap.from_list(
-            "fault", ["#ff000000", "#ff6600cc", "#ffdd00ee"], N=256
-        )
         ax.imshow(
-            mask,
-            aspect="auto",
-            cmap=fault_cmap,
-            vmin=0, vmax=1,
-            alpha=0.55,
-            interpolation="bilinear",
-            extent=extent,
+            mask, aspect="auto", cmap=_FAULT_CMAP, vmin=0, vmax=1,
+            alpha=0.55, interpolation="bilinear", extent=extent,
         )
+    elif show_fault_overlay and run_id and geom is not None:
+        # Real fault overlay from a completed UNet3D run.
+        try:
+            idx = geom.inline_to_index(inline)
+            ov = vapi.fetch_overlay(run_id, idx, API_BASE_URL)
+            prob = np.array(ov["fault_probability"], dtype=np.float32).T  # (n_s, n_xl)
+            ax.imshow(
+                prob, aspect="auto", cmap=_FAULT_CMAP, vmin=0, vmax=1,
+                alpha=0.55, interpolation="bilinear", extent=extent,
+            )
+            overlay_note = f"  ·  fault overlay from run `{run_id[:8]}`"
+        except ViewerAPIError as exc:
+            overlay_note = f"  ·  ⚠️ overlay unavailable: {exc}"
 
     ax.set_xlabel("Crossline", color="#94a3b8", fontsize=9)
     ax.set_ylabel("Two-way time (ms)", color="#94a3b8", fontsize=9)
-    is_real = "— real data" if api_data else "— synthetic placeholder"
     ax.set_title(
         f"Inline {inline}  —  {title_suffix}  ({is_real})",
         color="#e2e8f0", fontsize=9.5, pad=7,
@@ -197,7 +223,7 @@ def _render_section_image(
     fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
-    return buf.read()
+    return buf.read(), status + overlay_note
 
 
 def _generate_synthetic_section(inline: int) -> tuple[np.ndarray, list, str]:
@@ -282,14 +308,6 @@ def _chat(
         {"role": "assistant", "content": response},
     ]
     return history, ""
-
-
-def _update_viewer(
-    inline: int,
-    show_overlay: bool,
-) -> bytes:
-    """Return PNG bytes for the seismic inline section."""
-    return _render_section_image(inline, show_overlay)
 
 
 def _quick_action(action: str, history: list[dict[str, str]]) -> tuple[list[dict[str, str]], str]:
@@ -401,18 +419,29 @@ with gr.Blocks(
 
         # ── Right column: seismic viewer ───────────────────────────────────
         with gr.Column(scale=1, min_width=420):
+            with gr.Row():
+                survey_dd = gr.Dropdown(
+                    choices=[],
+                    label="Survey",
+                    interactive=True,
+                    scale=3,
+                )
+                refresh_surveys_btn = gr.Button("🔄", size="sm", scale=1)
+
             seismic_image = gr.Image(
                 label="Seismic Inline Viewer",
                 type="numpy",
                 height=400,
             )
 
+            viewer_status = gr.Markdown("_Select a survey to load real amplitudes._")
+
             with gr.Row():
                 inline_slider = gr.Slider(
-                    minimum=1000,
-                    maximum=1200,
-                    value=1050,
-                    step=5,
+                    minimum=0,
+                    maximum=100,
+                    value=0,
+                    step=1,
                     label="Inline number",
                     interactive=True,
                 )
@@ -421,11 +450,25 @@ with gr.Blocks(
                     label="Fault overlay",
                     interactive=True,
                 )
+                demo_check = gr.Checkbox(
+                    value=False,
+                    label="Demo (synthetic)",
+                    interactive=True,
+                )
 
-            gr.Markdown(
-                "_Seismic display is a synthetic placeholder for demo purposes. "
-                "Connect `get_inline_section` to real Zarr data for live rendering._",
-            )
+            with gr.Accordion("⚡ Live fault detection (UNet3D)", open=False):
+                with gr.Row():
+                    run_infer_btn = gr.Button(
+                        "Run fault detection", variant="primary", scale=2
+                    )
+                    check_infer_btn = gr.Button("Check status", scale=1)
+                infer_status = gr.Markdown(
+                    "_Runs the UNet3D model on the selected survey via the API "
+                    f"(checkpoint `{CHECKPOINT_BLOB}`). Results overlay onto the section._"
+                )
+
+    # State holding the active survey geometry + last inference run id.
+    _viewer_state = gr.State({"survey_id": None, "geom": None, "run_id": None})
 
     # ── Wire up events ─────────────────────────────────────────────────────
 
@@ -536,11 +579,89 @@ with gr.Blocks(
         new_history, cleared = _chat(message, history, persona)
         return new_history, cleared
 
-    def _render_pil(inline: int, show_overlay: bool) -> np.ndarray:
+    def _png_to_np(png_bytes: bytes) -> np.ndarray:
         import PIL.Image
-        png_bytes = _update_viewer(inline, show_overlay)
-        img = PIL.Image.open(io.BytesIO(png_bytes))
-        return np.array(img)
+        return np.array(PIL.Image.open(io.BytesIO(png_bytes)))
+
+    def _render(inline: int, show_overlay: bool, demo_mode: bool, state: dict):
+        """Render the section for the current survey/run. Returns (image, status)."""
+        survey_id = state.get("survey_id")
+        if not demo_mode and not survey_id:
+            png = _error_image("No survey selected — pick one from the Survey dropdown.")
+            return _png_to_np(png), "🔴 **No survey selected.**"
+        png, status = _render_section_image(
+            int(inline),
+            survey_id or "demo",
+            show_fault_overlay=show_overlay,
+            demo_mode=demo_mode,
+            run_id=state.get("run_id"),
+            geom=state.get("geom"),
+        )
+        return _png_to_np(png), status
+
+    def _refresh_surveys(state: dict):
+        """Populate the survey dropdown from the API (fail-loud)."""
+        try:
+            surveys = vapi.list_surveys(API_BASE_URL)
+        except ViewerAPIError as exc:
+            return gr.update(choices=[], value=None), f"🔴 **Cannot list surveys:** {exc}", state
+        if not surveys:
+            return gr.update(choices=[], value=None), "🟡 **No surveys ingested yet.**", state
+        return (
+            gr.update(choices=surveys, value=surveys[0]),
+            f"🟢 Found {len(surveys)} survey(s). Select one to load.",
+            state,
+        )
+
+    def _on_survey_change(survey_id: str, show_overlay: bool, demo_mode: bool, state: dict):
+        """Load geometry, reset the inline slider, and render the first inline."""
+        state = dict(state)
+        state["survey_id"] = survey_id
+        state["run_id"] = None
+        if not survey_id:
+            return gr.update(), None, "🟡 No survey selected.", state, ""
+        try:
+            geom = vapi.get_survey_geometry(survey_id, API_BASE_URL)
+        except ViewerAPIError as exc:
+            state["geom"] = None
+            png = _error_image(str(exc))
+            return gr.update(), _png_to_np(png), f"🔴 {exc}", state, ""
+        state["geom"] = geom
+        lo, hi, step = geom.inline_choices_bounds()
+        img, status = _render(lo, show_overlay, demo_mode, state)
+        slider = gr.update(minimum=lo, maximum=hi, step=step, value=lo)
+        return slider, img, status, state, ""
+
+    def _start_inference(state: dict):
+        survey_id = state.get("survey_id")
+        if not survey_id:
+            return state, "🔴 Select a survey before running inference."
+        try:
+            run_id = vapi.start_fault_detection(survey_id, CHECKPOINT_BLOB, API_BASE_URL)
+        except ViewerAPIError as exc:
+            return state, f"🔴 **Could not start inference:** {exc}"
+        state = dict(state)
+        state["run_id"] = run_id
+        return state, (
+            f"🟡 **Queued** run `{run_id[:8]}` on `{survey_id}`. "
+            "Click **Check status** to poll, then toggle the fault overlay."
+        )
+
+    def _check_inference(inline: int, show_overlay: bool, demo_mode: bool, state: dict):
+        run_id = state.get("run_id")
+        if not run_id:
+            return None, "🟡 No run started yet.", state
+        try:
+            st = vapi.poll_status(run_id, API_BASE_URL)
+        except ViewerAPIError as exc:
+            return None, f"🔴 **Status error:** {exc}", state
+        status_val = st.get("status", "unknown")
+        if status_val == "complete":
+            img, vstatus = _render(inline, show_overlay, demo_mode, state)
+            return img, f"🟢 **Complete** — run `{run_id[:8]}`. {vstatus}", state
+        if status_val in ("failed", "error"):
+            return None, f"🔴 **Run failed:** {st.get('error') or 'unknown error'}", state
+        return None, f"🟡 **{status_val}** — run `{run_id[:8]}` still processing…", state
 
     send_btn.click(
         _send,
@@ -552,15 +673,42 @@ with gr.Blocks(
         inputs=[msg_box, chatbot, persona_dd],
         outputs=[chatbot, msg_box],
     )
+
+    # -- Seismic viewer events --
+    refresh_surveys_btn.click(
+        _refresh_surveys,
+        inputs=[_viewer_state],
+        outputs=[survey_dd, viewer_status, _viewer_state],
+    )
+    survey_dd.change(
+        _on_survey_change,
+        inputs=[survey_dd, overlay_check, demo_check, _viewer_state],
+        outputs=[inline_slider, seismic_image, viewer_status, _viewer_state, infer_status],
+    )
     inline_slider.release(
-        _render_pil,
-        inputs=[inline_slider, overlay_check],
-        outputs=[seismic_image],
+        _render,
+        inputs=[inline_slider, overlay_check, demo_check, _viewer_state],
+        outputs=[seismic_image, viewer_status],
     )
     overlay_check.change(
-        _render_pil,
-        inputs=[inline_slider, overlay_check],
-        outputs=[seismic_image],
+        _render,
+        inputs=[inline_slider, overlay_check, demo_check, _viewer_state],
+        outputs=[seismic_image, viewer_status],
+    )
+    demo_check.change(
+        _render,
+        inputs=[inline_slider, overlay_check, demo_check, _viewer_state],
+        outputs=[seismic_image, viewer_status],
+    )
+    run_infer_btn.click(
+        _start_inference,
+        inputs=[_viewer_state],
+        outputs=[_viewer_state, infer_status],
+    )
+    check_infer_btn.click(
+        _check_inference,
+        inputs=[inline_slider, overlay_check, demo_check, _viewer_state],
+        outputs=[seismic_image, infer_status, _viewer_state],
     )
     clear_btn.click(lambda: ([], ""), outputs=[chatbot, msg_box])
 
@@ -576,16 +724,20 @@ with gr.Blocks(
             outputs=[chatbot, msg_box],
         )
 
-    # Render default inline and load browser on startup
-    def _initial_load():
-        state = {"container": "raw", "prefix": ""}
-        rows, crumb, state = _build_listing(state)
-        img = _render_pil(1050, True)
-        return rows, crumb, state, img
+    # Load the project browser and survey list on startup.
+    def _initial_load(state: dict):
+        bstate = {"container": "raw", "prefix": ""}
+        rows, crumb, bstate = _build_listing(bstate)
+        survey_update, vstatus, state = _refresh_surveys(state)
+        return rows, crumb, bstate, survey_update, vstatus, state
 
     demo.load(
         _initial_load,
-        outputs=[browse_listing, breadcrumb, _browser_state, seismic_image],
+        inputs=[_viewer_state],
+        outputs=[
+            browse_listing, breadcrumb, _browser_state,
+            survey_dd, viewer_status, _viewer_state,
+        ],
     )
 
 

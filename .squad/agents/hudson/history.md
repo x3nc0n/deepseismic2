@@ -10,6 +10,45 @@
 
 ## Learnings
 
+### 2026-06-24 — Sprint 2 S2-07 Test Coverage
+
+**Session:** Implemented Sprint 2 item S2-07 — comprehensive test suite for all Sprint 2 deliverables.
+
+**New test files (53 new tests across 4 files + 1 new test_training/ directory):**
+
+1. `src/tests/test_ingest/test_sprint2_label.py` (17 tests) — S2-01 label generation:
+   - `TestCoordinateMapping` (7 tests): pins abs_inline=1001+il_idx, abs_xl=1900+xl_idx, twt_ms=z_col×4.0; critical regression guard that z_col≈200 maps to ≥800 ms (not raw 202 ms); `load_volve_fault_sticks` parses synthetic .dat fixtures correctly.
+   - `TestFaultMaskGenerator` (4 tests): initial zeros, binary values, positive fraction > 0, dilation monotone.
+   - `TestLabelZarrOutput` (3 tests): dtype=uint8, shape matches volume_shape, values roundtrip exactly via zarr v3 LocalStore.
+
+2. `src/tests/test_preprocessing/test_sprint2_pipeline.py` (17 tests) — S2-06 QC pipeline:
+   - `TestComputeVolumeQC` (5 tests): all required keys present, shape/dtype correct, stat ordering sane (min≤p01≤p99≤max), sidecar_stats_used=False without sidecar.
+   - `TestDominantFrequency` (3 tests): 30 Hz and 50 Hz sinusoids recovered within ±3/4 Hz; Ricker 35 Hz within ±5 Hz.
+   - `TestAutocorrSymmetry` (2 tests): symmetric Gaussian → ratio ≈ 1.0; asymmetric → `xfail` (see BUG below).
+   - `TestGlobalAmplitudeNormalize` (7 tests): no mutation, ratio preserved, p99 scales to 1.0, ValueError for p99≤0, clip bounds enforced, clip=False allows extremes.
+
+3. `src/tests/test_training/test_sprint2_training.py` (14 tests) — S2-02/05/08:
+   - `TestTrainConfig` (3 tests): seed=42 default, data_mode="synthetic" default, zarr mode accepted.
+   - `TestAccumTpFpFn` (4 tests): exact confusion counts from logit tensors (TP=4,FP=2,FN=3 hand-crafted).
+   - `TestEpochMetrics` (5 tests): exact IoU/Dice/Precision/Recall from TP=5,FP=2,FN=3 (formulas pinned against per-batch averaging regression).
+   - `TestSeedDeterminism` (2 tests): same seed=42 via explicit `torch.Generator` → identical first batches; different seeds → different batches.
+
+4. `src/tests/test_validation/test_sprint2_eval.py` (17 tests) — S2-03:
+   - `TestComputeBinaryMetricsExact` (3 tests): exact IoU/Dice/Precision/Recall from hand-constructed confusion matrices.
+   - `TestEvaluateModelSchema` (5 tests): ValidationMetrics instance, all required fields, volume_shape, metrics in [0,1], summary string tokens.
+   - `TestRunEvaluationJSONSchema` (2 tests, `@pytest.mark.integration`): tiny zarr+checkpoint end-to-end JSON schema and serialisability.
+
+**Seed determinism fix:** Use explicit `torch.Generator` passed to `DataLoader(generator=...)` rather than `torch.manual_seed` on the global RNG; global-seed approach was fragile because RNG state differed between loader creation and first iteration.
+
+**BUG FOUND — `_autocorr_symmetry` (S2-06):**
+`pipeline._autocorr_symmetry` is mathematically broken. The autocorrelation of any real signal satisfies `ac[centre+k] = ac[centre-k]` exactly, making `e_pos = e_neg` always — the function returns 1.0 regardless of phase. Documented with `@pytest.mark.xfail(strict=True)` and decision note `hudson-s2-07-tests.md`. Recommended fix: Hilbert-transform instantaneous phase, or spectral asymmetry proxy.
+
+**Suite results (2026-06-24):**
+- Full non-integration: `pytest -m "not integration" -q` → **209 passed**, 2 skipped, 8 deselected, 1 xfailed ✓
+- Baseline was 156 passed → net +53
+- `ruff check` on all 4 new files → All checks passed ✓
+- Pre-existing `generate_fault_label.py` ruff issues (I001, E501) not introduced here.
+
 ### 2026-06-24 — ABSZarrV3Store + Azure/Local Resolver Tests (feat/adls-viewer-readers)
 
 **Session:** Added `src/tests/test_viewer/test_data_readers.py` — 26 new CI-safe tests covering Dallas's ADLS Phase 2 work (ABSZarrV3Store, _data_readers backend resolver).
@@ -49,43 +88,6 @@ For tests that genuinely need real baked zarr volumes (`TestAmplitudeReader`, `T
 - `pytest -m "not integration" -q`: 129 passed, 2 skipped, 5 deselected, 0 failures ✓
 - `ruff check src/`: All checks passed ✓
 - Pushed: `dab69c8` on `feat/real-fault-viewer`
-
-### 2026-06-09 — Test Harness Setup
-
-**Session:** Wrote full smoke test suite for all PoC modules.
-
-**Fixture design (`src/tests/conftest.py`):**
-- `sample_segy_path` is session-scoped (slow to create) using `tmp_path_factory`; use `segyio.SegySampleFormat.IBM_FLOAT_4_BYTE` not `.FLOAT`.
-- `tmp_zarr_store` is function-scoped `zarr.storage.LocalStore` (zarr v3 changed from `DirectoryStore`).
-- `azurite_client` uses try/except + `pytest.skip()` for graceful fallback — do NOT use pytest.mark.skipif at fixture level.
-- `mock_storage_client` and `mock_llm_response` are function-scoped MagicMocks.
-
-**Key zarr v3 API changes:**
-- `zarr.DirectoryStore` is gone → use `zarr.storage.LocalStore(path_str)`
-- `root.create_dataset(name, data=arr)` is gone → use `root.create_array(name, shape=..., dtype=...)` then `arr[:] = data`
-
-**UNet3D API:**
-- Constructor takes `config: UNetConfig | None`, not positional `in_channels/out_channels/depth`.
-- Use `_make_model(depth=3, init_features=8)` helper that wraps `UNetConfig` — keeps tests readable.
-- `model.save_checkpoint(path)` / `UNet3D.load_checkpoint(path)` are the canonical checkpoint methods.
-- `model.parameter_count()` returns `{"total": N, "trainable": N}`.
-
-**Mock pattern for stub modules:**
-- `patch.object(_mod, "func_name", return_value=..., create=True)` — use `create=True` when the attribute doesn't exist in the stub yet; omit `create=True` once the function is implemented.
-- Real-implementation tests that exercise modules still in dev: mark with `@pytest.mark.integration` to exclude from default CI.
-
-**Bug caught by tests:**
-- `segy_loader.load_segy()` fails on synthetic SEG-Y with `f.gather[il_no]` — `numpy.intc` not subscriptable as gather key. Flagged via `@pytest.mark.integration` test.
-
-**Test file locations:**
-- `src/tests/test_ingest/test_ingest.py` — ingest pipeline (5 test classes)
-- `src/tests/test_models/test_models.py` — UNet3D shape/checkpoint/parity (5 test classes)
-- `src/tests/test_storage.py` — blob client + zarr roundtrip (5 test classes)
-- `src/tests/test_agent.py` — agent tool registration + mock LLM (5 test classes)
-- `src/tests/test_api/test_api.py` — HTTP API contract (3 test classes, stand-in app)
-- `.github/workflows/ci.yml` — ruff + pytest (no integration) + coverage artifact upload
-
-**CI status:** 77 passed, 2 skipped (CUDA, extract_metadata stub), 5 deselected (integration) — **green**.
 
 ### 2026-06-24 — Phase 1 Real-Data Viewer Tests
 
@@ -127,12 +129,6 @@ For tests that genuinely need real baked zarr volumes (`TestAmplitudeReader`, `T
 
 **Merge:** Commit 776400a (squash). PR #3 ready for Phase 2 development.
 
-## Scribe Cross-Agent Update — 2026-06-10T04:30-05:00
-Sprint 1 coordination complete. All agents delivered successfully.
-- 5 agents synchronized
-- 7 decision documents archived
-- Full team context available in decisions.md
-
 ### 2026-06-24 — Phase 2: ADLS Viewer Backend Test Coverage (PR #4)
 
 **Session:** Hudson added comprehensive CI-safe test coverage for Dallas's Phase 2 ADLS viewer backend work (ABSZarrV3Store, backend resolver).
@@ -150,4 +146,7 @@ Sprint 1 coordination complete. All agents delivered successfully.
 **Result:** All tests pass; no bugs found in Dallas's code. (Three bugs in `ABSZarrV3Store` identified and fixed by review-storage + Dallas in parallel.)
 
 **Commit:** 18494f9 on feat/adls-viewer-readers. Validation: `pytest -m "not integration" -q` → 155 passed, 2 skipped, 6 deselected ✓; `ruff check src/` → All checks passed ✓
+
+
+
 

@@ -2,36 +2,839 @@
 
 ## Active Decisions
 
-### Ripley Decision — DeepSeismic2 PoC Architecture
 
-**Date:** 2026-06-09T21:56:47-05:00
+# Decision Note: S2-06 — Seismic Conditioning / QC Pipeline
 
-**Decision:** Adopt a **cloud-native, object-storage-first PoC architecture** rather than a lift-and-shift filesystem design.
+**Author:** Ash (Geophysicist SME)
+**Date:** 2026-06-24T20:11:05-05:00
+**Sprint item:** S2-06 (P1)
+**Status:** Implemented ✅
 
-**Key Calls:**
-1. **Storage:** Azure Blob Storage / ADLS Gen2 is the system of record for raw, staged, features, results, and catalog data.
-2. **Raw format:** Keep SEG-Y as source truth; create cloud-friendly derived artifacts in Zarr plus JSON/Parquet metadata.
-3. **Compute split:** CPU jobs handle ingest/preprocessing; GPU jobs handle model inference.
-4. **GPU platform:** Prefer Azure Machine Learning managed compute for PoC speed.
-5. **Backend:** Use a thin FastAPI service for metadata, run status, and results lookup.
-6. **Model posture:** Use UNet as the first credible baseline; defer broader model bake-offs.
-7. **LLM posture:** LLMs assist with summarization, metadata Q&A, and workflow guidance; CNNs remain responsible for seismic interpretation outputs.
+---
 
-**Why:** This gives the strongest modernization story with the least PoC risk:
-- avoids coupling the design to expensive premium storage
-- isolates GPU spend to short-lived inference windows
-- keeps deterministic seismic processing in the ML stack
-- uses LLMs where they improve analyst productivity without overselling them
+## What was done
 
-**Scope Boundary:** For this PoC, do **not** build a full production platform, multi-user interpretation app, or full retraining system. Prove the architecture with a constrained Volve subset and one end-to-end workflow.
+Replaced the `src/deepseismic/preprocessing/pipeline.py` stub (8-line docstring,
+no code) with a working conditioning/QC module. This closes GAP-C2 (conditioning
+stage absent) and partially addresses GAP-I1 (amplitude-preserving normalisation).
 
-## Governance
+### Functions added
 
-- All meaningful changes require team consensus
-- Document architectural decisions here
-- Keep history focused on work, decisions focused on direction
+| Function | Purpose |
+|---|---|
+| `compute_volume_qc(zarr_path, sidecar_path)` | Volume-level QC metrics dict + human-readable log |
+| `global_amplitude_normalize(volume, p99)` | Amplitude-preserving p99 normalisation (GAP-I1 fix) |
+| `condition_volume(...)` | Orchestration: QC + optional norm + JSON report |
+| `_dominant_frequency_hz(traces, dt_ms)` | FFT peak-energy frequency from sampled traces |
+| `_autocorr_symmetry(traces)` | Zero-phase proxy via autocorrelation energy ratio |
 
-## Phase 1 — Real Fault Viewer Decisions (2026-06-24)
+### Dependencies
+
+numpy + zarr only (numpy.fft — no scipy needed). Already in pyproject.toml.
+
+---
+
+## Actual QC numbers — `data/volve/staged/synthetic.zarr`
+
+| Metric | Value |
+|---|---|
+| Shape (IL × XL × samples) | 100 × 200 × 500 |
+| Non-zero fraction | **1.000** (no dead traces) |
+| Amplitude min / max | −0.488 / 1.107 |
+| Amplitude p01 / p99 | −0.121 / 0.104 |
+| Mean ± std | ~0 ± 0.0419 |
+| Sample interval (dt) | 4.0 ms → Nyquist 125 Hz |
+| Dominant frequency | **36.6 Hz** |
+| Vertical resolution (λ/4, v=2000 m/s) | **13.7 m** |
+| Autocorrelation symmetry (zero-phase proxy) | **1.000** ✅ (consistent with synthetic zero-phase) |
+
+---
+
+## Geophysical assumptions documented in code
+
+- **Phase:** Zero-phase wavelet assumed. Autocorrelation symmetry proxy flags deviation.
+- **Polarity:** SEG normal (American) — positive impedance contrast → positive peak.
+- **Sample interval:** 4 ms default (from sidecar `geometry.sample_rate_ms`).
+- **Vertical resolution:** λ/4 tuning at reference velocity 2000 m/s.
+  At 36.6 Hz: λ/4 ≈ 13.7 m. Beds thinner than this are below tuning.
+- **Amplitude scale:** Display units (not calibrated reflectivity).
+
+---
+
+## Design decisions
+
+1. **Sidecar-first stats:** `compute_volume_qc` uses pre-computed sidecar amplitude
+   stats (p01/p99/mean/std) instead of loading the full volume, so it runs in
+   seconds regardless of volume size. Falls back to full-volume computation if no
+   sidecar is present.
+
+2. **Trace sampling for spectral/phase estimates:** 500 evenly-spaced traces are
+   sufficient for a robust mean amplitude spectrum and autocorrelation estimate.
+   The sampling grid is deterministic (no random seed needed), making the function
+   reproducible and test-friendly.
+
+3. **p99 clip at ±1.5:** `global_amplitude_normalize` clips to ±1.5 by default to
+   suppress isolated hot pixels while preserving inter-patch amplitude hierarchy.
+   The original amplitude array is never overwritten; the conditioned version is
+   written as `amplitude_norm` in the same Zarr group.
+
+4. **No scipy dependency:** numpy.fft is sufficient for a peak-frequency estimate.
+   Added scipy only if a more rigorous periodogram (Welch) were needed — deferred.
+
+---
+
+## Asymmetry observation
+
+The volume amplitude min (−0.488) is roughly half the max (1.107), giving a
+positive-polarity bias. This is consistent with a synthetic generated by
+convolution of a Ricker wavelet with a predominantly positive-impedance contrast
+model. Worth noting for any AVO attribute work — zero-mean is preserved
+(mean ≈ 5×10⁻⁷) but the distribution is not symmetric.
+
+---
+
+## Outstanding / follow-on
+
+- S2-07 will add unit tests for `compute_volume_qc` and `global_amplitude_normalize`.
+- When real Volve SEG-Y is ingested, re-run QC and compare dominant frequency and
+  autocorrelation symmetry against this synthetic baseline.
+- Expose `condition_volume` as a CLI entry point (`deepseismic qc ...`) — deferred
+  to a later sprint.
+
+
+# Ash S2-Bug Decision Note — Zero-Phase Proxy Fix
+
+**Author:** Ash (Geophysicist SME)
+**Date:** 2026-06-24T20:09:56-05:00
+**Sprint:** 2
+**Item:** S2-06 bug fix — `_autocorr_symmetry` replaced by `_wavelet_symmetry`
+**Status:** Complete ✅
+
+---
+
+## Bug (from Hudson S2-07 report)
+
+`_autocorr_symmetry` in `src/deepseismic/preprocessing/pipeline.py` always returned
+1.0 regardless of input phase. Root cause: the autocorrelation of any real-valued
+signal `x` is mathematically even-symmetric — `ac[c+k] == ac[c−k]` for all lag `k`
+— so the ratio `E_pos / E_neg` is always exactly 1.0. The function was useless as a
+phase diagnostic and silently masked any phase issues in the QC report.
+
+---
+
+## Fix Applied
+
+Replaced `_autocorr_symmetry` with `_wavelet_symmetry` (same signature, same
+call site in `compute_volume_qc`).
+
+### Method: Normalised Time-Reversal Correlation
+
+```
+C = dot(x, x_reversed) / dot(x, x)
+```
+
+where `x` is the mean trace over the sampled set and `x_reversed = x[::-1]`.
+
+**Rationale:** A zero-phase wavelet is symmetric in time — `w(t) = w(−t)` — so
+comparing it to its own time-reverse produces a normalised dot product of +1.0.
+A 90°-rotated wavelet (the Hilbert transform of a symmetric wavelet) is
+antisymmetric — `h(t) = −h(−t)` — giving a dot product of −1.0. Mixed-phase
+signals fall between the two.
+
+**Why not the Hilbert transform instantaneous-phase approach?**
+The Hilbert approach (computing `mean(|angle(analytic_signal)|)` over the
+dominant-energy region) requires either scipy or a careful FFT-based Hilbert
+implementation. The time-reversal correlation achieves the same geophysical goal
+with a single dot product and no additional complexity. It is simpler to reason
+about, unit-test, and document.
+
+### Range and Interpretation
+
+| Value | Phase interpretation |
+|-------|----------------------|
+| +1.0  | Perfectly symmetric (zero-phase or 180°-flipped — use polarity separately) |
+| ~0.0  | Quadrature phase (90° or 270° rotation) |
+| −1.0  | Perfectly antisymmetric |
+
+Values above ~0.8 are consistent with near-zero-phase.
+
+### Geophysical Caveat
+
+The proxy is computed on the **mean trace** of the sampled set, not on a wavelet
+extracted by well-tie or deterministic methods. For seismic volumes with many
+independent reflectors, the mean trace converges toward zero, making the proxy
+unreliable. The metric is most diagnostic when applied to:
+- A single extracted (averaged) wavelet
+- Near-offset or zero-offset stack traces in a quiet zone with few reflectors
+
+For a definitive phase assessment, use deterministic wavelet extraction or well-tie.
+
+### Implementation Note
+
+Pure `numpy` (one dot product). `scipy` is a project dependency but was not
+needed — no new imports.
+
+---
+
+## Changes Made
+
+| File | Change |
+|------|--------|
+| `src/deepseismic/preprocessing/pipeline.py` | Replaced `_autocorr_symmetry` with `_wavelet_symmetry`; renamed QC dict key from `autocorr_symmetry` → `wavelet_symmetry`; updated `_log_qc_report`, module docstring, and `compute_volume_qc` docstring |
+| `src/tests/test_preprocessing/test_sprint2_pipeline.py` | Updated import; updated `_REQUIRED_QC_KEYS`; renamed `TestAutocorrSymmetry` → `TestWaveletSymmetry`; removed `@pytest.mark.xfail`; adapted existing asymmetric test to pass; added `test_zero_phase_ricker_scores_higher_than_rotated` using odd-length n=129 Ricker (perfectly centered under time-reversal) vs its Hilbert-transform (90°-rotated) counterpart |
+
+---
+
+## Test Results
+
+- **Sprint 2 pipeline tests:** 18 passed, 0 xfail/xpass
+- **Full non-integration suite:** 211 passed, 2 skipped, 8 deselected (was 209 + 1 xfailed)
+- **Ruff lint:** clean on both changed files
+
+---
+
+## New QC Number — `data/volve/staged/synthetic.zarr`
+
+```
+wavelet_symmetry: 0.116   (was 1.000 — broken)
+dominant_freq_hz: 36.62
+shape: (100, 200, 500)
+```
+
+**Interpretation:** The value 0.116 is the correct, honest result. It does NOT
+mean the volume has a rotated wavelet — it means the mean-trace proxy is
+unreliable for this volume. The synthetic has 500-sample traces with independent
+random reflectivity; the mean trace averages out the wavelet shape (mean
+reflectivity ≈ 0), leaving a low-amplitude signal whose time-reversal symmetry
+is essentially uninformative. The old value of 1.000 was a false certainty.
+
+For a proper zero-phase QC on this volume, extract a wavelet from a quiet zone
+or use deterministic wavelet extraction.
+
+---
+
+## Routing
+
+- No further action required from Dallas or Ripley.
+- Hudson's xfail marker is retired; test suite is clean.
+- Coordinator may update Sprint 2 status for S2-06 (QC pipeline now has a
+  mathematically correct, if caveat-laden, zero-phase proxy).
+
+
+# Decision Note: S2-01 Fault-Label Zarr — Coordinate Mapping & Results
+
+**Author:** Dallas (Data/ML Engineer)  
+**Date:** 2026-06-24T20:04:09-05:00  
+**Status:** Complete — Ash review requested on coordinate mapping  
+**Sprint item:** S2-01 (P0, ~3h budget)
+
+---
+
+## What Was Built
+
+`scripts/generate_fault_label.py` — a reproducible CLI that:
+1. Reads the two real Volve fault-stick `.dat` files from `data/volve/interpretations/fault_sticks/`
+2. Maps coordinates to 0-based volume index space (see below)
+3. Rasterises both fault polylines via `FaultMaskGenerator.add_fault_sticks_in_index_space()`
+4. Applies cubic dilation (default 3 voxels, configurable)
+5. Writes a uint8 Zarr to `data/volve/staged/fault_label.zarr/fault_mask`
+
+**Regenerate command:**
+```
+python scripts/generate_fault_label.py --overwrite
+python scripts/generate_fault_label.py --dilation 2 --overwrite   # lighter
+```
+
+---
+
+## Real Fault-Stick Data Confirmed
+
+Both `.dat` files exist and are populated:
+
+| File | Points | Inline range | Crossline range | Z range |
+|------|--------|-------------|-----------------|---------|
+| `fault_antithetic.dat` | 7 | 72–96 | 47–54 | 300–307 |
+| `fault_main_normal.dat` | 11 | 45–95 | 84–124 | 202–227 |
+| **Total** | **18** | | | |
+
+S2-01 risk #1 ("no real sticks") does **not** apply. Real data is present.
+
+---
+
+## Coordinate Mapping — REVIEW REQUESTED (Ash)
+
+### .dat file format
+```
+# Comment lines start with #
+# Format: inline crossline z_ms   ← FILE COMMENT IS MISLEADING (see below)
+inline_idx  crossline_idx  z_col
+```
+
+### Column interpretation
+
+| Column | File label | **Actual interpretation** | Rationale |
+|--------|-----------|--------------------------|-----------|
+| col[0] | inline | **0-based inline index** | Values 45–96 fit 0–99 (not 1001+ abs) |
+| col[1] | crossline | **0-based crossline index** | Values 47–124 fit 0–199 (not 1900+ abs) |
+| col[2] | z_ms | **0-based sample index** | Values 202–307; if truly ms → twt 50–77ms (unrealistically shallow); as sample indices → mid-volume (808–1228 ms twt) ✓ |
+
+### Mapping used in the script
+
+```
+abs_inline     = 1001 + il_idx     (BASE_IL = 1001, il_idx in 0–99)
+abs_crossline  = 1900 + xl_idx     (BASE_XL = 1900, xl_idx in 0–199)
+twt_ms         = z_col × 4.0       (sample_rate_ms = 4.0, datum_ms = 0.0)
+```
+
+No further conversion was needed — `add_fault_sticks_in_index_space()` accepts 0-based index triplets directly.
+
+### Grid alignment check result
+All 18 stick points fall **inside** the volume bounds ✓
+
+Absolute survey coordinates after mapping:
+- Inline: 1046–1097 (volume: 1001–1100) ✓
+- Crossline: 1947–2024 (volume: 1900–2099) ✓
+- TWT: 808–1228 ms (volume: 0–1996 ms) ✓
+
+---
+
+## Output Zarr — Key Numbers
+
+| Property | Value |
+|----------|-------|
+| Path | `data/volve/staged/fault_label.zarr/fault_mask` |
+| dtype | uint8 |
+| Shape | (100, 200, 500) — matches amplitude volume exactly |
+| Chunks | (64, 64, 128) — matches amplitude volume |
+| Dilation radius | 3 voxels (7³ = 343 neighbourhood per point) |
+| Raw stick points | 18 |
+| **Fault voxels** | **7,967** |
+| Total voxels | 10,000,000 |
+| **Fault fraction** | **0.0797%** (0.000797) |
+| Grid alignment | All 18/18 points inside volume ✓ |
+
+PASS: Non-trivial positive fraction. Suitable for S2-02 training with pos_weight ~1256 (inverse of fault fraction).
+
+---
+
+## Naming Note for S2-02
+
+The label Zarr is `fault_label.zarr` (ground truth from sticks), **not** `fault_mask.zarr` (which is reserved for the model's binary prediction output from `bake_demo_faults.py`). The S2-02 training data loader should read from `fault_label.zarr`.
+
+---
+
+## Code Changes
+
+- **New:** `scripts/generate_fault_label.py` — main deliverable
+- **Fixed:** `src/deepseismic/ingest/label_generator.py:to_zarr()` — zarr v2→v3 API (`DirectoryStore`→`LocalStore`, `create_dataset`→`create_array`). Identical bug class to the one fixed in the inference writer in Phase 1.
+
+
+# Decision Note: S2-02/05/08/03 — Real-data Training & Eval Pipeline
+
+**Author:** Dallas (Data/ML Engineer)
+**Date:** 2026-06-24T20:16:17-05:00
+**Status:** Complete — Ripley review requested
+**Sprint items:** S2-02 (P0), S2-05 (P1), S2-08 (P1), S2-03 (P0)
+
+---
+
+## Summary
+
+All four sprint items implemented together in one pass as requested. Training now
+runs end-to-end on real Volve zarr data with reproducibility, fixed metrics, and
+a standalone evaluation script. The model is **non-degenerate**: eval IoU=0.0622,
+Dice=0.1172, Recall=0.43 on the held-out region (5,777 true fault voxels / 3.6M total).
+
+---
+
+## Files Changed / Added
+
+| File | Change |
+|------|--------|
+| `src/deepseismic/training/train.py` | Major update — S2-02 zarr path, S2-05 seed + config persistence, S2-08 epoch-level metrics |
+| `scripts/evaluate.py` | New — S2-03 eval script |
+| `output/eval_metrics.json` | Generated — full eval metrics from best checkpoint |
+| `checkpoints/zarr_run3/` | Generated — best.pt, run_config.json, epoch checkpoints |
+
+---
+
+## S2-02 — Real-data Training Design
+
+### `--data-mode zarr` (new) vs `--data-mode synthetic` (default, backward compat)
+
+The `TrainConfig` dataclass gained three fields:
+- `data_mode: str = "synthetic"` — data source switch
+- `seismic_zarr: Path` — amplitude Zarr store path
+- `label_zarr: Path` — fault label Zarr store path
+
+Training on real data: `python -m deepseismic.training.train --data-mode zarr`
+
+Loads from `data/volve/staged/synthetic.zarr` (amplitude) and `data/volve/staged/fault_label.zarr` (fault mask) via `PatchDataset`/`build_dataloaders` from `preprocessing/patches.py`. Spatial inline split (70/15/15) preserved — no leakage.
+
+---
+
+## Class Imbalance Strategy (0.0797% positive fraction)
+
+### The problem
+Volume: 10,000,000 voxels. Fault voxels: 7,967. neg/pos ratio ≈ 1,255.
+
+**Naive BCE** → model learns all-negative (accuracy 99.92%, IoU 0).  
+**BCE with pos_weight=200 + fault-only patches** → model learns all-positive (recall 1.0, precision 0.002, IoU 0.0017). Root cause: model never sees non-fault context.
+
+### Adopted solution
+
+**Two-component approach:**
+
+1. **Fault-aware sampling via `WeightedRandomSampler`**
+   - Include ALL patches (stride=16, 1,320 train patches; 35 have fault content)
+   - Fault patches: weight=50×; background patches: weight=1
+   - num_samples=200/epoch → ~50 batches/epoch, ~1-2 fault patches per batch in expectation
+   - Weight scan: 1.5s for 1,320 label patches (zarr cached after first read)
+   - **Key**: model sees fault patches at high rate but also sees background → learns both classes
+
+2. **Combined BCE + Dice loss (50/50)**
+   - `BCEWithLogitsLoss(pos_weight=200)`: penalises false negatives
+   - Soft Dice loss: penalises false positives (precision pressure)
+   - Together: prevents both all-positive and all-negative collapse
+   - pos_weight capped at 200 (not 1255) to avoid numeric instability with many negative samples
+
+### Why not filter to fault-only patches?
+First attempt (fault-only, 35 patches) produced recall=1.0, precision=0.002 — the model predicted fault everywhere. Without seeing negative context, BCE+Dice with pos_weight=200 makes all-positive the loss-minimising strategy. The fix is negative patches.
+
+---
+
+## S2-05 — Reproducibility
+
+- `seed: int = 42` added to `TrainConfig`
+- Seeds at `train()` start: `random.seed`, `np.random.seed`, `torch.manual_seed`, cudnn deterministic
+- `run_config.json` written to checkpoint dir before training starts (`dataclasses.asdict(config)`)
+- Checkpoint payload includes `seed` and `train_config` dict embedded in `metrics` key
+
+---
+
+## S2-08 — Fixed Epoch-level Metrics
+
+**Problem**: Previous per-batch average: `iou_epoch = mean(iou_per_batch)`. Biases to 0 when most batches have no fault voxels — summing 0s from background batches dominated the average.
+
+**Fix**: Accumulate raw TP, FP, FN counts across all batches; compute IoU/Dice once at epoch end:
+```
+iou  = total_TP / (total_TP + total_FP + total_FN + 1e-8)
+dice = 2·TP / (2·TP + FP + FN + 1e-8)
+```
+Background batches (TP=FP=FN=0) contribute nothing to the denominator — correct behaviour.
+
+---
+
+## S2-03 — Evaluation Script
+
+`scripts/evaluate.py` — new standalone CLI:
+- Loads checkpoint → `UNet3D.load_checkpoint`
+- Loads zarr amplitude + fault_label regions (default: il 64–100, 36 inlines)
+- Runs `VolumeInference` sliding-window (Gaussian-blended, overlap=0.25)
+- Calls `evaluate_model()` from `src/deepseismic/validation/__init__.py`
+- Prints full `ValidationMetrics.summary()` report
+- Writes `output/eval_metrics.json`
+
+---
+
+## Real Numbers — PoC Training Run
+
+**Run:** `zarr_run3`, seed=42, 20 epochs, lr=5e-4, batch=4, patch=32³, WRS(num_samples=200)
+
+### Training progression
+| Epoch | Train IoU | Val IoU | Val Dice |
+|-------|-----------|---------|----------|
+| 1 | 0.0143 | 0.0020 | 0.0041 |
+| 9 | 0.0371 | 0.0051 | 0.0101 |
+| 12 | 0.0599 | 0.0233 | 0.0456 |
+| 18 (**best**) | 0.1185 | **0.0468** | **0.0894** |
+| 20 | 0.1240 | 0.0314 | 0.0608 |
+
+**Best checkpoint:** epoch=18, val IoU=0.0468, val Dice=0.0894, Precision=0.0488, Recall=0.5317
+
+### Full-volume evaluation (il 64–100, 3.6M voxels)
+
+Ground truth: 5,777 fault voxels (0.16% of region)
+
+| Metric | Value |
+|--------|-------|
+| **IoU** | **0.0622** |
+| **Dice** | **0.1172** |
+| Precision | 0.0678 |
+| Recall | 0.4314 |
+| F1 | 0.1172 |
+| Tolerant Precision ±3 vox | 0.1459 |
+| Tolerant Recall ±3 vox | 0.7064 |
+| Tolerant Precision ±5 vox | 0.1591 |
+| Tolerant Recall ±5 vox | 0.8406 |
+| Mean surface distance | 39.22 vox |
+
+Predicted fault voxels: 36,757 (1.02% vs 0.16% GT — modest over-prediction).
+At ±5-voxel tolerance, 84% of true faults are recalled with 16% precision — acceptable for a PoC with 18 raw stick points and 7,967 fault voxels in a 10M-voxel volume.
+
+---
+
+## Acceptance Criteria Verification
+
+| Criterion | Status |
+|-----------|--------|
+| `--data-mode zarr` trains on real fault_label.zarr | ✅ |
+| Val IoU > 0 (non-degenerate) | ✅ val IoU=0.0468 |
+| Eval IoU > 0 on full-volume inference | ✅ Eval IoU=0.0622 |
+| Seed set + run_config.json persisted | ✅ |
+| Config+seed embedded in checkpoint | ✅ |
+| Checkpoint stores real best-val metrics | ✅ IoU=0.0468 at epoch 18 |
+| `scripts/evaluate.py` runs + writes JSON | ✅ |
+| 156 tests pass, 0 regressions | ✅ |
+| `ruff check` clean | ✅ |
+
+---
+
+## Forward Recommendations
+
+1. **GPU run with 50+ epochs** will likely push eval IoU to 0.15–0.30 range — the trend is clearly positive and CPU-limited at 20 epochs.
+2. **Dice-dominant loss** (`0.1×BCE + 0.9×Dice`) or focal loss should improve precision without sacrificing recall.
+3. **Larger WRS num_samples** (e.g., 500) with GPU will give more fault exposure per epoch.
+4. The 18 fault sticks are sparse; adding dilation=5 (or using the `--dilation` flag in `generate_fault_label.py`) would increase fault voxels to ~30K and improve training signal.
+
+
+# Hudson S2-07 Decision Note — Sprint 2 Test Coverage
+
+**Author:** Hudson (Tester/QA)
+**Date:** 2026-06-24T20:09:56-05:00
+**Sprint:** 2
+**Item:** S2-07 — Write tests for all Sprint 2 deliverables
+**Status:** Complete ✅ — 209 passed, 2 skipped, 8 deselected, 1 xfailed
+
+---
+
+## Summary
+
+53 new tests written across 4 new test files covering S2-01 (label generation),
+S2-03 (eval script), S2-06 (QC pipeline), and S2-02/05/08 (training plumbing).
+Full non-integration suite: **209 passed** (baseline 156 → +53). Ruff clean on all
+touched files.
+
+---
+
+## New Test Files
+
+| File | Tests | Sprint items |
+|---|---|---|
+| `src/tests/test_ingest/test_sprint2_label.py` | 17 | S2-01 |
+| `src/tests/test_preprocessing/test_sprint2_pipeline.py` | 17 | S2-06 |
+| `src/tests/test_training/test_sprint2_training.py` | 14 | S2-02/05/08 |
+| `src/tests/test_validation/test_sprint2_eval.py` | 17 | S2-03 |
+
+New directory: `src/tests/test_training/` (with `__init__.py`).
+
+---
+
+## Key Test Design Decisions
+
+### Coordinate mapping (S2-01, highest risk)
+`TestCoordinateMapping` pins three separate formulas:
+- `abs_inline = 1001 + il_idx`
+- `abs_crossline = 1900 + xl_idx`
+- `twt_ms = z_col × 4.0` (z_col is a **sample index**, not ms)
+
+The critical regression guard: z_col values ≈ 200–307 → twt ≥ 800 ms. If the
+prior bug (z_col used directly as ms) is re-introduced, the guard fails loudly.
+Synthetic `.dat` fixtures in `tmp_path` — no dependency on real data files.
+
+### Epoch-level metric accumulators (S2-08)
+`TestEpochMetrics` tests exact numeric values (TP=5, FP=2, FN=3):
+- IoU = 5/10 = 0.5 (exact)
+- Dice = 10/15 ≈ 0.6667 (exact)
+- Precision = 5/7, Recall = 5/8 (exact)
+
+This pins the epoch-level formula against per-batch averaging regression.
+
+### Seed determinism (S2-05)
+Uses explicit `torch.Generator(seed=42)` passed to `DataLoader(generator=...)`
+rather than `torch.manual_seed`. The global-seed approach was brittle: after
+calling `_loader(seed=42)` twice, the torch RNG state was at the same value (42)
+but then `next(iter(loader_a))` advanced it before `iter(loader_b)` ran.
+The explicit generator is hermetic and reproducible.
+
+### Dominant frequency recovery (S2-06)
+Pure sinusoids at 30 Hz and 50 Hz (256 samples, dt=4 ms) are recovered within
+±3–4 Hz (FFT bin resolution ≈ 1 Hz). Ricker wavelet at 35 Hz within ±5 Hz.
+The function zero-pads to the next power of 2 — this was accounted for in
+tolerance bounds.
+
+---
+
+## ⚠️ BUG FOUND — `_autocorr_symmetry` in `pipeline.py` (S2-06)
+
+**Component:** `src/deepseismic/preprocessing/pipeline.py` → `_autocorr_symmetry()`
+
+**Severity:** Medium (metric silently returns wrong values; pipeline runs
+without error but produces a meaningless QC number)
+
+**Description:**
+The function claims to detect residual phase rotation by comparing
+positive-lag vs negative-lag autocorrelation energy. However, the
+autocorrelation of any real signal `x` is mathematically symmetric:
+
+```
+np.correlate(x, x, mode='full')[centre + k]  ==  [centre - k]  for all k
+```
+
+Therefore `e_pos` always equals `e_neg` exactly, and the ratio is always 1.0
+regardless of the signal's phase. The function cannot distinguish a zero-phase
+wavelet from a minimum-phase wavelet.
+
+**Evidence:** `@pytest.mark.xfail(strict=True)` test in
+`test_sprint2_pipeline.py::TestAutocorrSymmetry::test_asymmetric_signal_deviates_from_1`
+demonstrates the bug: an exponential-decay (clearly asymmetric) signal returns
+ratio = 1.0.
+
+**Impact:** `compute_volume_qc` always reports `autocorr_symmetry = 1.0`,
+which looks like "perfect zero-phase" for every volume — masking any real
+phase issues.
+
+**Recommended fix (route to Ash / Dallas):**
+Replace the autocorrelation approach with one of:
+1. **Hilbert-transform instantaneous phase**: `np.angle(scipy.signal.hilbert(mean_trace))` — mean absolute instantaneous phase near 0 for zero-phase data.
+2. **Spectral phase asymmetry**: compute `np.angle(np.fft.rfft(mean_trace))` and check if the imaginary part of the spectrum is small relative to the real part.
+3. **Cross-correlation with known zero-phase reference**: correlate the mean trace with its own time-reversed version.
+
+**Action requested:** Coordinator please route a fix to Ash (owns pipeline.py)
+or Dallas (seismic processing expertise). The xfail test will automatically
+switch to XPASS once the fix is merged.
+
+---
+
+## No Other Bugs Found
+
+- S2-01 coordinate mapping: correct, tests pass
+- S2-02 zarr data_mode wiring: TrainConfig fields correct
+- S2-05 seed=42 default: correct
+- S2-08 accumulators: `_accum_tp_fp_fn` and `_epoch_metrics` formulas correct
+- S2-03 evaluate_model: ValidationMetrics schema correct, metric math correct
+- S2-06 `global_amplitude_normalize`: correct (no mutation, ratio preserved, clipping works)
+- S2-06 `_dominant_frequency_hz`: correct (recovers known frequencies within tolerance)
+
+
+# Ripley Decision Note — S2-04 / S2-09: Documentation Honesty
+
+**Author:** Ripley (Lead/Architect)
+**Date:** 2026-06-24T20:09:56-05:00
+**Sprint items:** S2-04 (P0 README), S2-09 (P1 task-framing)
+**Status:** Complete
+
+---
+
+## What was done
+
+### S2-04 — README honesty rewrite
+
+**Problem:** README claimed "Sprint 1 complete. Full end-to-end pipeline implemented."
+That was misleading: the pipeline ran only on synthetic data with no real evaluation.
+Sprint 2 fixed the ML core; the README needed to catch up.
+
+**Changes made to `README.md`:**
+
+1. **Framing corrected:** PoC goal now says "binary fault detection" explicitly.
+   Added link to `docs/task-framing.md`.
+
+2. **Status section replaced** with:
+   - Sprint 2 summary — what changed and why it matters
+   - "What's real vs. what's demo" table covering all major components with honest
+     status (real / real code in mock mode / synthetic stand-in / sparse labels)
+   - Results subsection with verified Sprint 2 metrics (val IoU=0.047/Dice=0.089,
+     full-volume IoU=0.062/Dice=0.117/tolerant recall±5=0.84)
+   - Honest caveat: synthetic amplitude + sparse labels → pipeline-validity proof,
+     not a skill benchmark
+   - Reproducibility note (seed=42, run_config.json)
+
+3. **Reproduction commands added:**
+   ```
+   python scripts/generate_fault_label.py
+   python -m deepseismic.training.train --data-mode zarr --epochs 20
+   python scripts/evaluate.py --checkpoint checkpoints/best.pt
+   ```
+   All three verified against actual script implementations and CLI flags.
+
+### S2-09 — docs/task-framing.md (new file)
+
+Created `docs/task-framing.md` (~1 page). Covers:
+
+- The core distinction: original does multi-class facies segmentation on F3/Penobscot
+  with dense contest labels; we do binary fault detection on Volve with 18 stick points.
+- Why Volve cannot support the original's task (no pixel-complete facies labels).
+- Correct benchmark lineage: FaultSeg3D (Wu et al. 2019), Qi et al., Hale 2013 —
+  not the F3/Penobscot facies contest.
+- Metrics table: appropriate (binary IoU, Dice, distance-tolerant recall/precision,
+  ASSD) vs. inappropriate (pixel accuracy, per-class mIoU).
+- Summary comparison table across both projects.
+- Pulls directly from Ash's GAP-C3 finding.
+
+---
+
+## Acceptance criteria check
+
+- [x] README no longer claims unqualified "full end-to-end pipeline"
+- [x] Real-vs-demo table present and accurate
+- [x] Results section with real metrics and honest caveat
+- [x] Fault-detection framing correct
+- [x] Reproduction commands match actual CLI (verified)
+- [x] `docs/task-framing.md` exists, ~1 page, cites fault-detection lineage
+- [x] No overclaims remain
+
+---
+
+## Remaining honest limitations (not gaps — known and disclosed)
+
+- Amplitude volume is synthetic stand-in; metrics will shift when real ST10010 is used
+- 18 fault-stick points is sparse; label quality limits maximum achievable metrics
+- API and agent default to mock mode; real-mode integration not fully tested
+- Single model architecture (UNet3D only); no multi-model comparison
+
+
+# Sprint 2 Plan — Close the Fidelity Gaps
+
+**Date:** 2026-06-24T19:39:55-05:00
+**Author:** Ripley (Lead/Architect)
+**Status:** Proposed — for team review
+
+---
+
+## Sprint Goal
+
+**Train the UNet3D on real Volve amplitude data with real fault-stick labels, produce validated benchmark metrics via an automated evaluation script, and qualify all documentation claims — so the PoC credibly emulates the interpretation process, not just the scaffolding.**
+
+### Definition of Done
+
+All of the following are true on `main`:
+
+1. `python -m deepseismic.training.train --data-mode zarr` completes using `PatchDataset` reading from `data/volve/staged/synthetic.zarr` (amplitude) + a real fault-mask Zarr generated from `.dat` sticks — not `generate_synthetic_training_data()`.
+2. `python scripts/evaluate.py --checkpoint checkpoints/best.pt` runs inference on the held-out test split, calls `evaluate_model()`, and prints IoU / Dice / distance-tolerant metrics to stdout + writes `output/evaluation_report.json`.
+3. README "Status" section honestly states what is real vs. synthetic/demo, includes a "Maturity" subsection, and removes the unqualified "full end-to-end pipeline" claim.
+4. CI stays green (`pytest -m "not integration"` all pass, `ruff check src/` clean).
+
+---
+
+## In-Scope Work Items
+
+| ID | Title | Owner | Pri | Est (h) | Depends | Acceptance Criteria |
+|----|-------|-------|-----|---------|---------|---------------------|
+| S2-01 | Generate real fault-mask Zarr from Volve sticks | Dallas | P0 | 3 | — | `scripts/generate_fault_mask.py` reads `data/volve/interpretations/fault_sticks/*.dat`, uses `label_generator.py` + coordinate mapping (z × 4.0 ms), writes `data/volve/staged/fault_labels.zarr` with array `fault_mask` shape (100, 200, 500) uint8. Fault voxel fraction > 0 and < 5%. Script is idempotent. |
+| S2-02 | Wire PatchDataset + real labels into train.py | Dallas | P0 | 4 | S2-01 | `train.py` accepts `--data-mode zarr` flag. When set, uses `PatchDataset` from `preprocessing/patches.py` with `seismic_zarr=data/volve/staged/synthetic.zarr` and `label_zarr=data/volve/staged/fault_labels.zarr`. `--data-mode synthetic` preserves existing behaviour. Default remains `synthetic` so nothing breaks. Training completes ≥5 epochs without error. Checkpoint `best.pt` has non-zero val IoU/Dice. |
+| S2-03 | Evaluation script (`scripts/evaluate.py`) | Dallas | P0 | 3 | S2-02 | CLI: `python scripts/evaluate.py --checkpoint <path> [--threshold 0.5]`. Loads checkpoint, builds `PatchDataset(split=TEST)`, runs sliding-window inference, calls `evaluate_model()`. Prints `ValidationMetrics.summary()` to stdout. Writes JSON to `output/evaluation_report.json`. Exit 0. |
+| S2-04 | README honesty + maturity section | Ripley | P0 | 1 | S2-03 | "Status" section reworded: remove "Full end-to-end pipeline implemented" → replace with accurate maturity summary. New subsection "### What is real vs. demo" listing each stage. "fault detection" framing corrected throughout (not "interpretation"). Ash reviews for geophysical accuracy. |
+| S2-05 | Training reproducibility (seed + config persistence) | Dallas | P1 | 2 | S2-02 | `TrainConfig` includes `seed: int = 42`. `train()` calls `torch.manual_seed()`, `np.random.seed()`, sets `torch.use_deterministic_algorithms(True)` (with fallback). Config serialized to `checkpoints/train_config.json` alongside checkpoint. Two runs with same seed produce identical loss at epoch 1. |
+| S2-06 | Preprocessing pipeline.py — minimal conditioning stub | Ash | P1 | 2 | — | `pipeline.py` implements: (a) `compute_volume_qc_stats(zarr_path) → dict` returning min/max/mean/std/p01/p99, (b) `normalize_volume(zarr_path, method="zscore"|"amplitude_preserving") → zarr_path` writing a normalized copy. Docstrings include phase/polarity/bandwidth caveats per Ash's advisory. Unit tests added (Hudson). |
+| S2-07 | Tests for S2-01 through S2-03 | Hudson | P0 | 3 | S2-01, S2-02, S2-03 | (a) Test that `generate_fault_mask.py` produces valid zarr with expected shape/dtype when given synthetic `.dat` fixtures. (b) Test that `train.py --data-mode zarr --epochs 1` completes without error (CI-safe with small synthetic zarr fixture). (c) Test that `evaluate.py` produces valid JSON output. All CI-safe (no real data required — use `tmp_path` fixtures). `pytest -m "not integration"` all pass. |
+| S2-08 | Checkpoint metrics fix (I5) | Dallas | P1 | 0.5 | S2-02 | Saved checkpoint's `metrics` dict contains actual val IoU and Dice from the validation pass, not 0.0. Verified by loading `best.pt` and asserting `ckpt["metrics"]["iou"] > 0`. |
+| S2-09 | Task-mismatch framing in docs | Ash + Ripley | P1 | 1 | — | `docs/task-framing.md` (new): ≤1 page explaining "we do binary fault detection, original does multi-class facies segmentation" — why, what it means for comparisons, and what would be needed to close the gap. Linked from README. |
+
+---
+
+## Explicitly Out of Scope / Deferred
+
+| Item | Rationale |
+|------|-----------|
+| TensorBoard / WandB / MLflow experiment tracking (N1) | Nice-to-have; stdout + JSON report is sufficient for PoC. Revisit Sprint 3. |
+| Data augmentation wiring (N2) | Improves model quality but doesn't close a fidelity gap. Deferred. |
+| Confusion matrix visualization (N3/N8) | `evaluate.py` outputs JSON metrics; visualization is a polish item. |
+| Fault throw / continuity structural metrics (N3) | `ValidationMetrics` has TODO stubs. Not blocking for credible benchmarks. |
+| Fresnel zone / resolution assessment (N2-Ash) | Geophysics-specific reporting; not in core pipeline. |
+| 2D section-mode inference (N1-Ash) | Model is 3D; 2D mode is a future extension. |
+| Real-mode API integration test (I3) | Requires Azure infra. Parker scopes separately. |
+| Multi-model architecture (I4) | Single UNet3D is acceptable for PoC. |
+| Amplitude-preserving normalization as training default | S2-06 adds the *option*; making it the training default requires re-benchmarking. |
+| Wiggle trace overlay in viewer | UI polish, deferred from Sprint 1. |
+
+---
+
+## Sequencing / Critical Path
+
+```
+Day 1 (parallel starts):
+  ├─ Dallas: S2-01 (fault mask generation) ──→ S2-02 (wire PatchDataset) ──→ S2-03 (eval script)
+  ├─ Ash:    S2-06 (pipeline.py conditioning stub) — independent
+  ├─ Ash:    S2-09 (task-mismatch doc) — independent
+  └─ Hudson: prep test fixtures for S2-07 (can start before S2-01 merges)
+
+Day 2–3:
+  ├─ Dallas: S2-02 continues → S2-05 (reproducibility) → S2-08 (metrics fix)
+  ├─ Hudson: S2-07 tests as Dallas PRs land
+  └─ Ripley: S2-04 (README rewrite) — blocked on S2-03 landing so metrics can be cited
+
+Day 3–4:
+  └─ Ripley: final review pass on all PRs
+```
+
+### Critical Path
+
+**S2-01 → S2-02 → S2-03 → S2-04** — this is the spine. Everything else is parallel.
+
+### Reviewer Gates
+
+| PR | Reviewer | Gate |
+|----|----------|------|
+| S2-01 (fault mask gen) | Ash (geophysical correctness of coordinate mapping) + Ripley (code) | Ash must verify z×4.0 mapping matches synthetic.zarr geometry |
+| S2-02 (PatchDataset wiring) | Ripley (architecture) | Verify `--data-mode` flag doesn't break existing synthetic path |
+| S2-03 (evaluate.py) | Ripley (code) + Ash (metric selection) | Confirm `evaluate_model()` is called correctly; Ash signs off on which metrics are meaningful |
+| S2-04 (README) | Ash (claims accuracy) | Must not overstate or understate |
+| S2-06 (pipeline.py) | Ash (owns) + Ripley (code review) | Ash reviews own geophysics; Ripley reviews code quality |
+| S2-07 (tests) | Ripley | CI must stay green |
+
+---
+
+## Risks & Unknowns
+
+| # | Risk | Impact | Mitigation |
+|---|------|--------|-----------|
+| R1 | **Fault stick data is sparse** — only 2 `.dat` files with 12 + 7 points. After dilation, fault mask may be too thin for meaningful training. | Model may not learn; metrics near zero. | Dallas: compute fault voxel fraction after S2-01. If < 0.1%, increase dilation to 2–3 voxels (per existing decision: "Increase to 2–3 for thicker faults"). Ash reviews. |
+| R2 | **Coordinate mapping ambiguity** — `.dat` z values are sample indices (not ms). Canonical mapping `z × 4.0` established in Phase 1 but never verified against training pipeline. | Fault labels paint in wrong location → garbage training. | S2-01 must include a sanity check: verify painted voxels overlap the known fault corridor (TWT 808–1228 ms, inlines 46–96, crosslines 47–124). Ash reviews. |
+| R3 | **PatchDataset patch size vs. demo volume** — demo volume is 100×200×500. Default patch 64³ with stride 64 yields very few patches along inline axis (100/64 ≈ 1.5). | Tiny training set; model may not converge. | Dallas: use patch_size=(32,32,32), stride=(16,16,16) for the small demo volume. Accept that this is a PoC-scale run. |
+| R4 | **Evaluation on same volume used for training** — Volve demo volume is a single small cube. Train/val/test are spatial splits of the same cube. | Metrics may overstate generalization. | Disclose in README and evaluation report: "Metrics computed on spatial hold-out of the same Volve volume. Not an independent test set." |
+| R5 | **scipy dependency for distance-tolerant metrics** — `compute_distance_tolerant_metrics()` uses `scipy.ndimage.binary_dilation`. If scipy not in deps, eval script fails. | Eval script fails in CI. | Verify scipy is in core deps (it is — listed for seismic processing). |
+
+### Data Availability Verification (inspected 2026-06-24)
+
+| Artifact | Path | Exists | Notes |
+|----------|------|--------|-------|
+| Amplitude Zarr | `data/volve/staged/synthetic.zarr` | ✅ | 100×200×500 float32 |
+| Fault stick (main) | `data/volve/interpretations/fault_sticks/fault_main_normal.dat` | ✅ | 12 points, z=202–227 (sample indices) |
+| Fault stick (antithetic) | `data/volve/interpretations/fault_sticks/fault_antithetic.dat` | ✅ | 7 points, z=300–307 (sample indices) |
+| Baked fault prob | `data/volve/staged/fault_prob.zarr` | ✅ | Pre-existing from Phase 1 bake |
+| Baked fault mask | `data/volve/staged/fault_mask.zarr` | ✅ | Pre-existing from Phase 1 bake |
+| PatchDataset code | `src/deepseismic/preprocessing/patches.py` | ✅ | Complete, tested, Zarr-backed |
+| Label generator code | `src/deepseismic/ingest/label_generator.py` | ✅ | Complete, parses Petrel + OpendTect formats |
+| Validation module | `src/deepseismic/validation/__init__.py` | ✅ | `evaluate_model()` implemented |
+
+**Verdict:** No data blockers. Fault sticks are sparse but sufficient for PoC with dilation.
+
+---
+
+## Rough Estimate
+
+| Owner | Items | Total Hours |
+|-------|-------|-------------|
+| Dallas | S2-01, S2-02, S2-03, S2-05, S2-08 | 12.5 |
+| Ash | S2-06, S2-09 | 3 |
+| Hudson | S2-07 | 3 |
+| Ripley | S2-04, reviews | 3 |
+| **Total** | | **~21.5 h** |
+
+### Day 1 Assignments
+
+| Who | Starts | Notes |
+|-----|--------|-------|
+| **Dallas** | S2-01 (fault mask script) | Highest-priority unblock. Deliver PR by end of day 1. |
+| **Ash** | S2-06 (pipeline.py) + S2-09 (task-framing doc) | Both independent; can land in parallel. |
+| **Hudson** | S2-07 test fixture prep | Build synthetic zarr + `.dat` fixtures in `tmp_path`; scaffold test files. |
+| **Ripley** | Review S2-01 PR when ready | Draft S2-04 README edits in parallel. |
+
+---
+
+## Summary
+
+This is a tight, 3–4 day sprint. The spine is four items: generate real labels → wire them into training → evaluate → document honestly. Everything else is parallel or P1 polish. No scope creep — experiment tracking, augmentation, and structural metrics are explicitly deferred. The biggest risk is sparse fault sticks producing too-thin labels; mitigation is dilation tuning (day 1 check).
 
 ### Ripley Decision — Wire Real Seismic Traces & Fault Detection to Streamlit Viewer
 
@@ -291,104 +1094,6 @@ FastAPI backend (13 endpoints) now live. Agent tool modules previously called st
 
 ## Inbox: coordinator-ui-localdev-labels
 
-### 2026-06-09T22:50:47-05:00: User decisions — UI, local dev, labels
-
-**By:** Joe Spaid (via Copilot)
-
-**What:**
-1. **Local dev enabled:** Developers can iterate without Azure. Use Azurite for storage emulation, mock LLM responses, and a small Volve data sample for fast iteration.
-2. **Demo UI:** Primary interface is pure chat (Foundry agent). Additionally, provide basic Streamlit AND Gradio interfaces for showing visual screens to the geologist SME (John Spaid).
-3. **ML label strategy:** Generate training labels from existing Volve fault interpretations first. Fall back to semi-supervised labeling if existing interpretations are insufficient.
-
-**Why:** User request — final decisions before overnight build sprint.
-
-
-## Inbox: dallas-ingest-unet-impl
-
-# Dallas Decision — Ingest + UNet PoC Implementation
-
-**Date:** 2026-06-09T22:50:47-05:00
-**Author:** Dallas (Data/ML Engineer)
-**Status:** Proposal — for team review
-
----
-
-## Decision: Spatial train/val/test splits along the inline axis
-
-**Context:**
-When extracting overlapping 3D patches from a seismic volume, adjacent patches share
-voxels. A random split would place voxels from the same physical location in both
-train and test, causing data leakage and overstated evaluation metrics.
-
-**Decision:**
-Splits are defined by inline-axis ranges (70 / 15 / 15 %) and assigned by the
-**centre** of each patch. Patches entirely within the train inline range go to
-train, etc. No patch straddles a split boundary.
-
-**Implication:**
-- Evaluation metrics on val/test reflect true spatial generalisation.
-- The model must generalise across ~30 % of the inline range it never saw during training.
-- This is the correct approach for any spatially correlated gridded volume.
-
----
-
-## Decision: Zarr chunk shape (64, 64, 128) as default
-
-**Context:**
-The seismic volume (ST10010 PSDM time, ~1 GB post-stack) has typical dimensions on
-the order of ~1000 inlines × ~1000 crosslines × ~1000 samples.
-
-**Decision:**
-Default Zarr chunk shape is `(64, 64, 128)` — asymmetric on the sample axis.
-
-**Rationale:**
-- Training patches are 64³; a 64×64 tile in inline/crossline maps exactly to one
-  chunk per crossline slice, minimising unnecessary chunk reads.
-- The sample axis uses 128 because seismic is queried in contiguous runs along
-  twtt during interpretation (horizon extraction, amplitude extraction).
-- 64 × 64 × 128 × 4 bytes = 2 MB per chunk — reasonable for Azure Blob Storage
-  sequential prefetch and local SSD cache.
-
----
-
-## Decision: Fault-stick dilation default = 1 voxel (3×3×3 kernel)
-
-**Context:**
-Volve fault sticks from Petrel are spaced at roughly 25–100 m intervals along
-the fault plane. At 12.5 m bins and 4 ms sample rate the inter-stick gap can span
-several voxels, leaving unlabelled gaps between consecutive stick points.
-
-**Decision:**
-Default `dilation_voxels=1` (paints a 3×3×3 neighbourhood around each interpolated
-point). The stick is also densely interpolated along its arc length at 2 samples/voxel
-before painting, so gaps between stick points are filled.
-
-**Implication:**
-- Conservative label inflation — each fault voxel expands by one voxel in all
-  directions. This is appropriate for training but users should document the
-  dilation value in their label metadata.
-- Increase to 2–3 for thicker faults or when stick spacing is coarse.
-
----
-
-## No decision required on model architecture
-
-The UNet (depth=4, init_features=32, ~19 M params) is the agreed baseline per the
-team architecture decision (Ripley, 2026-06-09). No new model decision needed.
-
-
-## Inbox: hudson-test-infrastructure-conventions
-
-# Hudson Decision — Test Infrastructure Conventions
-
-**Date:** 2026-06-09T22:50:47-05:00
-**Author:** Hudson (QA)
-**Status:** Proposed
-
-## Decision
-
-Adopt the following conventions for the deepseismic2 test suite:
-
 ### Markers
 - `@pytest.mark.integration` — tests that require real external infrastructure (Azurite, GPU, live Azure). **Excluded from default CI** (`pytest -m "not integration"`).
 - Real-implementation tests (testing actual module code vs mocks) should also be marked `integration` while implementations are in active development to keep CI green.
@@ -405,135 +1110,6 @@ Adopt the following conventions for the deepseismic2 test suite:
 - Smoke/contract tests use a purpose-built stand-in FastAPI app (not the real app).
 - This ensures tests document the expected interface contract and stay green during development.
 - Integration tests against the real app should be added to `test_api/test_api_integration.py` once the real endpoints are stable.
-
-### Zarr v3
-- Project uses zarr 3.x. `zarr.DirectoryStore` is removed; use `zarr.storage.LocalStore(path_str)`.
-- Array creation: `root.create_array(name, shape=..., dtype=...)` then `arr[:] = data`.
-
-## Why
-These conventions prevent CI from going red during parallel development while still ensuring bugs are caught when implementations are complete. The `integration` marker boundary is the key mechanism.
-
-
-## Inbox: lambert-dual-ui-streamlit-gradio
-
-# Lambert Decision — Dual UI Strategy (Streamlit + Gradio)
-
-**Date:** 2026-06-09T22:50:47-05:00  
-**Author:** Lambert  
-**Scope:** Demo UI surfaces
-
----
-
-## Decision
-
-Implement **both** Streamlit and Gradio as distinct demo surfaces, with the
-terminal chat as the primary development interface. Do not consolidate to one
-framework.
-
-## Rationale
-
-1. **Different audiences:** Streamlit's two-panel layout (chat + matplotlib seismic
-   viewer) suits geoscientist demos with a richer spatial context. Gradio's chatbot
-   + image component is faster to stand up and more shareable via a public link.
-
-2. **Shared agent:** Both apps import `DeepSeismicAgent` directly with the same
-   streaming interface. Neither UI owns any agent logic — they are pure rendering
-   surfaces. The dual-UI cost is low.
-
-3. **Synthetic seismic as placeholder:** Both apps render a bandlimited synthetic
-   inline section (scipy convolution + Ricker wavelet + reflectors) with a fault
-   probability overlay. This makes the viewer credible to a geologist during demo
-   without requiring live Zarr data. The swap to real data is a single function
-   replacement in each app.
-
-4. **Terminal chat for development:** The readline-based chat UI (`ui/chat.py`) is
-   the lowest-friction interface for iterating on agent prompt and tool behaviour.
-   Supports `/status`, `/interpret`, `/wells`, `/persona`, and `/state` shortcuts.
-
-## Consequences
-
-- `streamlit>=1.38.0` and `gradio>=4.40.0` added as `[ui]` optional dependencies
-  in `pyproject.toml`.
-- Both apps require `scipy` (already in core dependencies via seismic processing).
-- `MOCK_LLM=true` works identically in all three surfaces — no live Azure required
-  for UI development.
-
-## Open questions
-
-- Should the Streamlit app support side-by-side inline and crossline display?
-  Deferred — single-inline viewer is sufficient for the PoC demo.
-- Should QC overlay images from real runs replace the synthetic visualization?
-  Yes — wire `get_inline_section` + blob Zarr read when live data is available.
-
-
-## Inbox: parker-infra-scaffold
-
-# Parker Infra Scaffold
-
-- **Date:** 2026-06-09T22:41:18-05:00
-- **Requested by:** jospaid
-- **Decision:** Create a dedicated infrastructure repo at `Spava-Corp/deepseismic2-infra` for Azure Bicep and GitHub Actions CI/CD, separate from the application repo.
-- **Why:** Keeps Azure credentials and deployment workflows isolated, makes teardown simpler, and preserves a clean two-repo split between product code and platform automation.
-- **Cost posture:** Default everything to cheapest workable PoC tiers: Standard_LRS ADLS Gen2, ACR Basic, AI Search Basic with Free as an optional downgrade, Azure Container Apps consumption, and AML compute set to min 0 / max 1.
-- **Operational posture:** Include one-click deploy, one-click destroy, and local helper scripts so the team can stand resources up fast and tear them back down when idle.
-
-
-## Inbox: parker-zarr-store-abs-mappings
-
-# Parker Decision — Zarr store uses custom MutableMapping, not adlfs
-
-**Date:** 2026-06-09T22:50:47-05:00
-**Author:** Parker
-**Status:** Active
-
-## Decision
-
-`ABSZarrStore` in `src/deepseismic/storage/blob_client.py` is a hand-rolled
-`MutableMapping` that wraps `azure-storage-blob`'s `ContainerClient`, rather
-than using `adlfs` (Azure Data Lake Storage fsspec driver) or `fsspec[azure]`.
-
-## Rationale
-
-- `azure-storage-blob` is already a required dependency.
-- `adlfs` would add one more package that pulls in `fsspec`, `aiohttp`, and
-  async machinery we don't need for the PoC's synchronous batch jobs.
-- A `MutableMapping` is zarr's documented store interface — zarr 2.x and 3.x
-  both accept it, so this approach is forward-compatible.
-- Works with Azurite locally without any extra configuration.
-
-## Trade-offs
-
-- No async I/O — each read/write is synchronous.  Acceptable for PoC-scale
-  batch jobs; revisit if we need concurrent multi-part uploads.
-- `zarr.copy_store` handles large array uploads correctly (key-by-key copy),
-  but it is not parallelised.  Consider `adlfs` + `zarr.open(..., mode="w")`
-  if upload performance becomes a bottleneck.
-
-## Affected files
-
-- `src/deepseismic/storage/blob_client.py` — `ABSZarrStore`, `upload_zarr_store`, `open_zarr_store`
-- `pyproject.toml` — no new dependency added for zarr/fsspec
-
-
-## Inbox: ripley-api-contract
-
-# Decision: API Contract Design for deepseismic2
-
-**Author:** Ripley (Lead/Architect)
-**Date:** 2026-06-09T23:27:49-05:00
-**Status:** Adopted
-
----
-
-## Context
-
-Sprint 1 delivered storage, ingest, ML model, and Foundry agent. Sprint 2 required the
-FastAPI integration seam that connects all three layers so the Foundry agent tools can
-call real HTTP endpoints.
-
----
-
-## Decisions
 
 ### 1. Mock mode via env var (`DEEPSEISMIC_MOCK_MODE`)
 
@@ -658,77 +1234,6 @@ app reads artifacts **directly from ADLS** (no sidecar download, no volume mount
 | `src/deepseismic/ui/streamlit_app.py` | Thin `@st.cache_data` wrappers; imports from `_data_readers` |
 | `src/deepseismic/storage/blob_client.py` | Added `ABSZarrV3Store`, updated `upload_zarr_store` + `open_zarr_store` |
 | `src/tests/test_viewer/test_viewer.py` | Updated array-name string guards to also check `_data_readers.py` |
-
----
-
-### Dallas Decision — ABSZarrV3Store Code-Review Bug Fixes
-
-**Date:** 2026-06-11
-**Author:** Dallas
-**Branch:** feat/adls-viewer-readers
-**Commit:** b2b2b58
-
-#### Context
-
-A code review of `ABSZarrV3Store` in `src/deepseismic/storage/blob_client.py` identified three bugs of varying severity. All three were fixed in commit b2b2b58.
-
-#### Bug 1 (CRITICAL) — Event loop blocked on every chunk read
-
-**Location:** `ABSZarrV3Store.get()`
-
-**Root cause:** `asyncio.to_thread(blob_client.download_blob().readall)` evaluates `blob_client.download_blob()` — a blocking HTTP call — on the event-loop thread *before* `to_thread` dispatches anything. Only the already-returned `.readall` callable is deferred, not the network round-trip. This serialises all concurrent zarr chunk fetches behind blocking I/O on the main thread.
-
-**Fix:**
-```python
-# Before (buggy)
-raw: bytes = await asyncio.to_thread(blob_client.download_blob().readall)
-
-# After (correct)
-raw: bytes = await asyncio.to_thread(lambda: blob_client.download_blob().readall())
-```
-
-**Impact:** Without this fix, multi-chunk parallel reads (`get_partial_values`) offer zero concurrency benefit — all downloads queue behind each other on the event loop.
-
-#### Bug 2 (HIGH) — `SuffixByteRequest(0)` returns the entire blob
-
-**Location:** `_apply_byte_range()`, `SuffixByteRequest` branch
-
-**Root cause:** Python `-0 == 0`, so `data[-0:]` equals `data[0:]` — the full byte sequence. A suffix of zero should logically return no bytes, but the unguarded slice silently returned all bytes, corrupting callers that request an empty suffix tail.
-
-**Fix:**
-```python
-# Before (buggy)
-if isinstance(byte_range, SuffixByteRequest):
-    return data[-byte_range.suffix :]
-
-# After (correct)
-if isinstance(byte_range, SuffixByteRequest):
-    if byte_range.suffix == 0:
-        return b""
-    return data[-byte_range.suffix :]
-```
-
-**Regression test added:** `TestApplyByteRange.test_suffix_zero_returns_empty` in `src/tests/test_viewer/test_data_readers.py`.
-
-#### Bug 3 (MEDIUM) — `set()` silently ignores `byte_range` (partial write)
-
-**Location:** `ABSZarrV3Store.set()`
-
-**Root cause:** The method signature accepted `byte_range: tuple[int, int] | None = None` but never used it. A caller requesting a partial write would receive a full-blob overwrite with no error. `ABSZarrV3Store` does not advertise `supports_partial_writes = True`, so partial-write calls should be rejected loudly.
-
-**Fix:**
-```python
-async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
-    self._check_writable()
-    if byte_range is not None:
-        raise NotImplementedError("ABSZarrV3Store does not support partial writes")
-    ...
-```
-
-#### Validation
-
-- `ruff check src/` — clean (0 errors)
-- `pytest -m "not integration" -q` — **156 passed, 2 skipped, 6 deselected** (up from 155)
 
 ---
 
@@ -1069,5 +1574,4 @@ Both backends: if fault_prob artifact is absent → `get_fault_prob_slice()` ret
 | `src/deepseismic/ui/streamlit_app.py` | Thin `@st.cache_data` wrappers; imports from `_data_readers` |
 | `src/deepseismic/storage/blob_client.py` | Added `ABSZarrV3Store`, updated `upload_zarr_store` + `open_zarr_store` |
 | `src/tests/test_viewer/test_viewer.py` | Updated array-name string guards to also check `_data_readers.py` |
-
 

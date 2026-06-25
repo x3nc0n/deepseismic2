@@ -232,10 +232,26 @@ class SEGYLoader:
 
         logger.info("Opening SEG-Y: %s", self._segy_path)
 
-        with segyio.open(str(self._segy_path), ignore_geometry=self.ignore_geometry) as f:
-            f.mmap()  # memory-map for faster sequential reads
-            geom = self._extract_geometry(f)
-            data = self._read_traces(f, geom)
+        try:
+            with segyio.open(str(self._segy_path), ignore_geometry=self.ignore_geometry) as f:
+                f.mmap()  # memory-map for faster sequential reads
+                geom = self._extract_geometry(f)
+                data = self._read_traces(f, geom)
+        except ValueError as exc:
+            # Real surveys often have irregular XL counts per inline (edge-of-survey
+            # boundary traces absent).  segyio raises "Inlines inconsistent" in that case.
+            # Fall back to reading all trace headers explicitly and building a padded volume.
+            if "inconsistent" not in str(exc).lower():
+                raise
+            logger.warning(
+                "segyio geometry inference failed (%s); falling back to "
+                "irregular-grid reconstruction (reads all trace headers).",
+                exc,
+            )
+            with segyio.open(str(self._segy_path), ignore_geometry=True) as f:
+                f.mmap()
+                geom, ils, xls = self._extract_geometry_irregular(f)
+                data = self._read_traces_irregular(f, geom, ils, xls)
 
         logger.info(
             "Loaded volume shape (IL × XL × S): %s  dtype=%s",
@@ -369,6 +385,138 @@ class SEGYLoader:
             n_loaded = min(traces.shape[0], n_xl)
             volume[il_idx, :n_loaded, :] = traces[:n_loaded]
 
+        return volume
+
+    def _extract_geometry_irregular(
+        self, f: segyio.SegyFile
+    ) -> tuple[SurveyGeometry, np.ndarray, np.ndarray]:
+        """Extract geometry from a SEG-Y with an irregular trace grid.
+
+        Reads all trace headers in bulk via :meth:`segyio.SegyFile.attributes`
+        (one syscall per field, much faster than per-trace header dicts).
+
+        Returns
+        -------
+        geom : SurveyGeometry
+            Grid extent derived from the actual IL/XL header values.
+        ils : np.ndarray[int32]
+            Inline number for each trace (length = f.tracecount).
+        xls : np.ndarray[int32]
+            Crossline number for each trace (length = f.tracecount).
+        """
+        logger.info(
+            "Irregular-grid: reading all %d trace IL/XL headers via attributes()...",
+            f.tracecount,
+        )
+        ils = np.array(f.attributes(segyio.TraceField.INLINE_3D)[:], dtype=np.int32)
+        xls = np.array(f.attributes(segyio.TraceField.CROSSLINE_3D)[:], dtype=np.int32)
+
+        unique_ils = np.unique(ils)
+        unique_xls = np.unique(xls)
+
+        il_min = int(unique_ils[0])
+        il_max = int(unique_ils[-1])
+        il_step = int(unique_ils[1] - unique_ils[0]) if len(unique_ils) > 1 else 1
+        xl_min = int(unique_xls[0])
+        xl_max = int(unique_xls[-1])
+        xl_step = int(unique_xls[1] - unique_xls[0]) if len(unique_xls) > 1 else 1
+
+        sample_rate_ms = segyio.tools.dt(f) / 1_000.0
+        n_samples = f.samples.size
+        datum_ms = float(f.header[0].get(segyio.TraceField.DelayRecordingTime, 0))
+
+        geom = SurveyGeometry(
+            inline_min=il_min,
+            inline_max=il_max,
+            inline_step=il_step,
+            crossline_min=xl_min,
+            crossline_max=xl_max,
+            crossline_step=xl_step,
+            sample_rate_ms=sample_rate_ms,
+            n_samples=n_samples,
+            n_inlines=len(unique_ils),
+            n_crosslines=len(unique_xls),
+            datum_ms=datum_ms,
+        )
+        logger.info(
+            "Irregular-grid geometry: IL %d–%d (n=%d), XL %d–%d (n=%d), "
+            "n_samples=%d, dt=%.1f ms",
+            il_min, il_max, geom.n_inlines,
+            xl_min, xl_max, geom.n_crosslines,
+            n_samples, sample_rate_ms,
+        )
+        return geom, ils, xls
+
+    def _read_traces_irregular(
+        self,
+        f: segyio.SegyFile,
+        geom: SurveyGeometry,
+        ils: np.ndarray,
+        xls: np.ndarray,
+    ) -> np.ndarray:
+        """Fill a zero-padded volume from an irregular-grid SEG-Y.
+
+        Missing IL/XL cells (survey boundary absent traces) remain zero.
+        Sample mode restricts to the first ``sample_n_inlines`` inlines.
+
+        Parameters
+        ----------
+        f : segyio.SegyFile
+            Open file handle (ignore_geometry=True).
+        geom : SurveyGeometry
+            Full-survey geometry from :meth:`_extract_geometry_irregular`.
+        ils, xls : np.ndarray[int32]
+            Per-trace inline/crossline arrays.
+        """
+        n_il = geom.n_inlines
+        n_xl = geom.n_crosslines
+        n_s = geom.n_samples
+
+        if self.sample_mode:
+            n_il = min(n_il, self.sample_n_inlines)
+            logger.info(
+                "Irregular-grid sample mode: loading %d / %d inlines", n_il, geom.n_inlines
+            )
+
+        max_il_value = geom.inline_min + (n_il - 1) * geom.inline_step
+
+        # Build O(1) index lookup maps
+        il_map = {
+            il: idx
+            for idx, il in enumerate(
+                range(geom.inline_min, geom.inline_max + 1, geom.inline_step)
+            )
+        }
+        xl_map = {
+            xl: idx
+            for idx, xl in enumerate(
+                range(geom.crossline_min, geom.crossline_max + 1, geom.crossline_step)
+            )
+        }
+
+        volume = np.zeros((n_il, n_xl, n_s), dtype=np.float32)
+        n_placed = 0
+
+        logger.info(
+            "Irregular-grid: reading %d traces → volume (%d × %d × %d)...",
+            f.tracecount, n_il, n_xl, n_s,
+        )
+        for trace_idx in range(f.tracecount):
+            il_val = int(ils[trace_idx])
+            if il_val > max_il_value:
+                continue
+            xl_val = int(xls[trace_idx])
+            il_idx = il_map.get(il_val)
+            xl_idx = xl_map.get(xl_val)
+            if il_idx is None or xl_idx is None:
+                continue
+            volume[il_idx, xl_idx, :] = f.trace.raw[trace_idx]
+            n_placed += 1
+
+        logger.info(
+            "Irregular-grid: placed %d / %d traces (%.1f%% fill)",
+            n_placed, f.tracecount, 100.0 * n_placed / max(f.tracecount, 1),
+        )
         return volume
 
     @staticmethod

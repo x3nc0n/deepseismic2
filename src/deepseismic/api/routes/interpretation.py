@@ -226,7 +226,7 @@ def run_fault_detection(
         "fault_voxel_fraction": None,
     }
 
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         _interp_jobs[run_id]["status"] = "complete"
         _interp_jobs[run_id]["fault_voxel_fraction"] = 0.0412
         logger.info("Mock fault detection for survey=%s run_id=%s", req.survey_id, run_id)
@@ -258,7 +258,7 @@ def get_status(run_id: str, storage: StorageClientDep) -> InterpretationStatus:
             error=job.get("error"),
         )
 
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_status(run_id)
 
     # Attempt to load from catalog if the job survived a restart
@@ -281,7 +281,7 @@ def get_status(run_id: str, storage: StorageClientDep) -> InterpretationStatus:
 @router.get("/{run_id}/results", response_model=InterpretationResult)
 def get_results(run_id: str, storage: StorageClientDep) -> InterpretationResult:
     """Return fault probability volume metadata and download URL for a completed run."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_result(run_id)
 
     # Check in-memory first
@@ -332,7 +332,7 @@ def get_overlay(
     run_id: str, inline_number: int, storage: StorageClientDep
 ) -> FaultOverlay:
     """Return fault probability and binary mask for a single inline section."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_overlay(run_id, inline_number)
 
     try:

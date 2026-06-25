@@ -33,15 +33,20 @@ async def lifespan(app: FastAPI):
             "deepseismic2 API starting in MOCK MODE — no real storage required"
         )
     else:
-        client = _build_storage_client()
-        if client is not None:
-            try:
-                client.ensure_containers()
-                logger.info("Storage containers verified / created")
-            except Exception as exc:
-                logger.warning("Could not verify storage containers: %s", exc)
-        else:
-            logger.warning("Storage client unavailable — running in degraded mode")
+        try:
+            client = _build_storage_client()
+            if client is not None:
+                try:
+                    client.ensure_containers()
+                    logger.info("Storage containers verified / created")
+                except Exception as exc:
+                    logger.warning("Could not verify storage containers: %s", exc)
+        except Exception as exc:
+            logger.error(
+                "Storage client failed to initialise — API will return 503 on "
+                "storage-dependent endpoints until the configuration is fixed: %s",
+                exc,
+            )
 
     yield
 
@@ -94,11 +99,46 @@ def root():
 @app.get("/health", tags=["ops"])
 @app.get("/api/health", tags=["ops"], include_in_schema=False)
 def health() -> dict[str, Any]:
-    """Liveness probe used by Docker HEALTHCHECK and load balancers."""
+    """Liveness + readiness probe.
+
+    ``status`` is always ``"ok"`` when the process is alive (liveness).
+    ``storage`` reports real storage reachability (readiness):
+      - ``"mock"``        — explicit mock mode, no real storage needed
+      - ``"ok"``          — real mode, storage pinged successfully
+      - ``"unreachable"`` — real mode, client built but storage not responding
+      - ``"error"``       — real mode, client could not be built (config error)
+
+    Used by Docker HEALTHCHECK, load balancers, and post-deploy infra checks.
+    """
     mock = is_mock_mode()
-    storage_up = not mock and _build_storage_client() is not None
-    return {
+    if mock:
+        return {"status": "ok", "mock_mode": True, "storage": "mock"}
+
+    # Try to obtain the storage client (raises if misconfigured)
+    try:
+        client = _build_storage_client()
+    except Exception as exc:
+        return {
+            "status": "ok",  # process is alive
+            "mock_mode": False,
+            "storage": "error",
+            "storage_error": str(exc),
+        }
+
+    # Lightweight reachability check — list up to 1 blob from catalog
+    try:
+        client.list_blobs("catalog", max_results=1)
+        storage_status = "ok"
+        storage_error = None
+    except Exception as exc:
+        storage_status = "unreachable"
+        storage_error = str(exc)
+
+    result: dict[str, Any] = {
         "status": "ok",
-        "mock_mode": mock,
-        "storage": "mock" if mock else ("ok" if storage_up else "unavailable"),
+        "mock_mode": False,
+        "storage": storage_status,
     }
+    if storage_error:
+        result["storage_error"] = storage_error
+    return result

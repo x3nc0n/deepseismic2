@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
 
 
+def _is_mock() -> bool:
+    """Return True only when MOCK_LLM is explicitly set to a truthy value.
+
+    Checked at call time so the env var can be changed after module import
+    (e.g. test isolation) without reimporting the module.
+    """
+    return os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
+
+
 # ---------------------------------------------------------------------------
 # Mock payloads
 # ---------------------------------------------------------------------------
@@ -162,7 +171,7 @@ def generate_summary(
         ``status``, ``summary`` text, ``key_findings`` list, ``qc_stats``,
         and ``caveats`` (when ``include_caveats=True``).
     """
-    if MOCK_MODE:
+    if _is_mock():
         result = dict(_MOCK_SUMMARY)
         result["result_id"] = result_id
         if not include_caveats:
@@ -235,7 +244,7 @@ def export_interpretation(
         dict with ``export_id``, ``package_path`` (storage URI), ``included_artifacts``
         list, ``status``, and ``expires_at`` for the temporary download link.
     """
-    if MOCK_MODE:
+    if _is_mock():
         result = dict(_MOCK_EXPORT)
         result["result_id"] = result_id
         result["format"] = export_format
@@ -301,7 +310,7 @@ def create_qc_report(
         ``recommended_action`` (when ``include_recommendations=True``),
         and ``caveats``.
     """
-    if MOCK_MODE:
+    if _is_mock():
         result = dict(_MOCK_QC_REPORT)
         result["run_id"] = run_id
         result["generated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

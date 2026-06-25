@@ -184,14 +184,14 @@ def _mock_well_logs(well_id: str) -> WellLog:
 @router.get("", response_model=list[WellListItem])
 def list_wells(storage: StorageClientDep) -> list[WellListItem]:
     """List all wells in the catalog."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_well_list()
 
     try:
         blobs = storage.list_blobs("catalog", prefix="wells/")
     except Exception as exc:
-        logger.warning("Could not list wells from storage: %s", exc)
-        return _mock_well_list()
+        logger.error("Could not list wells from storage: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Storage unavailable: {exc}") from exc
 
     seen: set[str] = set()
     items: list[WellListItem] = []
@@ -228,7 +228,7 @@ def list_wells(storage: StorageClientDep) -> list[WellListItem]:
 @router.get("/{well_id}", response_model=WellMetadata)
 def get_well(well_id: str, storage: StorageClientDep) -> WellMetadata:
     """Return well metadata including formation tops and available log inventory."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_well_metadata(well_id)
 
     blob_path = f"wells/{well_id}/metadata.json"
@@ -258,7 +258,7 @@ def get_well(well_id: str, storage: StorageClientDep) -> WellMetadata:
 @router.get("/{well_id}/logs", response_model=WellLog)
 def get_well_logs(well_id: str, storage: StorageClientDep) -> WellLog:
     """Return all log curves for a well as JSON arrays (depth + named curves)."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_well_logs(well_id)
 
     blob_path = f"wells/{well_id}/logs.json"

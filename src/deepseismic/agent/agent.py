@@ -296,7 +296,15 @@ class FoundryAgent:
         from azure.identity import DefaultAzureCredential, get_bearer_token_provider
         from openai import AzureOpenAI
 
-        endpoint = os.environ["AZURE_PROJECT_ENDPOINT"]
+        endpoint = os.environ.get("AZURE_PROJECT_ENDPOINT", "").strip()
+        if not endpoint:
+            raise RuntimeError(
+                "AZURE_PROJECT_ENDPOINT is not set. "
+                "Set this environment variable to your Azure AI Foundry project endpoint URL "
+                "before starting the agent in live mode. "
+                "To run without Azure, set MOCK_LLM=true for local development."
+            )
+
         credential = DefaultAzureCredential()
         token_provider = get_bearer_token_provider(
             credential, "https://cognitiveservices.azure.com/.default"
@@ -472,10 +480,26 @@ class DeepSeismicAgent:
         self.state = SessionState(persona=persona)
 
         if _is_mock_mode():
-            logger.info("DeepSeismicAgent: starting in MOCK mode (MOCK_LLM=true)")
+            logger.info(
+                "DeepSeismicAgent: starting in MOCK mode (MOCK_LLM=true) — "
+                "no Azure calls will be made"
+            )
             self._impl: MockAgent | FoundryAgent = MockAgent()
         else:
-            logger.info("DeepSeismicAgent: connecting to Azure AI Foundry")
+            endpoint = os.environ.get("AZURE_PROJECT_ENDPOINT", "").strip()
+            if not endpoint:
+                raise RuntimeError(
+                    "DeepSeismicAgent: live mode is active but AZURE_PROJECT_ENDPOINT "
+                    "is not configured. Either:\n"
+                    "  • Set AZURE_PROJECT_ENDPOINT to your Azure AI Foundry endpoint URL, or\n"
+                    "  • Set MOCK_LLM=true for local development without Azure credentials.\n"
+                    "Live mode will NOT silently fall back to mock — this is intentional."
+                )
+            logger.info(
+                "DeepSeismicAgent: starting in LIVE mode — endpoint: %s  model: %s",
+                endpoint,
+                os.environ.get("AZURE_OPENAI_MODEL", "chat"),
+            )
             self._impl = FoundryAgent(persona=persona)
             self.state.thread_id = self._impl.create_thread()
 
@@ -526,5 +550,5 @@ class DeepSeismicAgent:
             "persona": self.state.persona,
             "steps_completed": len(self.state.step_history),
             "tool_calls": len(self.state.tool_call_log),
-            "mock_mode": MOCK_MODE,
+            "mock_mode": _is_mock_mode(),
         }

@@ -102,30 +102,58 @@ python -m ruff check src/               # linting
 
 ## Status
 
-**Sprint 2 complete — real-data training and evaluation implemented.**
+**Sprint 3 complete — real-data app-readiness. Real-data execution is deploy-gated.**
 
-The core ML loop is now real: UNet3D is trained on genuine Volve fault-stick labels
-rasterized from field interpretation data, and evaluation runs against a held-out
-volume region with non-degenerate metrics. This is **binary fault detection** on
-Volve — a different task from the reference microsoft/seismic-deeplearning project
-(which does multi-class facies segmentation on F3/Penobscot). See
-[docs/task-framing.md](docs/task-framing.md) for the full rationale.
+The app is now **ready** to consume real Volve ST10010 data end-to-end: ingest,
+label generation, training, evaluation, and the API + agent all have real-data
+execution paths wired and locally validated. **Execution on real data is blocked
+by infrastructure and data-access dependencies** described in the blockers section
+below — not by code gaps. See [docs/real-data-runbook.md](docs/real-data-runbook.md)
+for the ordered deploy path.
 
-### What's real vs. what's demo
+This is **binary fault detection** on Volve — a different task from the reference
+microsoft/seismic-deeplearning project (multi-class facies segmentation on
+F3/Penobscot). See [docs/task-framing.md](docs/task-framing.md) for the full rationale.
+
+### What's real vs. what's demo (Sprint 3)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| SEG-Y → Zarr ingest | ✅ Real | Parses actual Volve ST10010 geometry |
-| Fault label generation | ✅ Real | 18 fault-stick points from two Volve `.dat` files, rasterized at dilation=3 |
-| UNet3D training on real labels | ✅ Real | `--data-mode zarr`, seed=42, `run_config.json` persisted |
-| Evaluation with real metrics | ✅ Real | `scripts/evaluate.py` → `output/eval_metrics.json` |
+| SEG-Y → Zarr ingest geometry | ✅ App-ready | File-driven; handles real ST10010 inlines 9985–10369. New `scripts/ingest_segy.py` CLI. Real execution deferred — blocked on infra #11 |
+| Fault label generation | ✅ App-ready | Directory-based (any `.dat` files); optional between-pick interpolation (`--interpolate-between`). Validated with synthetic proxy (76 picks → 0.30% positive fraction). Real data deferred — blocked on Marketplace install |
+| UNet3D training (ADLS backend) | ✅ App-ready | `--storage-backend azure` reads staged Zarr via `ABSZarrV3Store`. Real execution deferred — in-VNet only |
+| Evaluation (ADLS backend) | ✅ App-ready | `scripts/evaluate.py --storage-backend azure`. Real execution deferred — in-VNet only |
+| FastAPI backend (real mode default) | ✅ Real default | Real mode is now the default when storage is configured. Mock requires explicit opt-in (`DEEPSEISMIC_MOCK_MODE=true`). Misconfigured real mode fails loud (HTTP 503) — no silent mock fallback |
+| Foundry agent (real mode default) | ✅ Real default | Live Azure OpenAI is the default when `AZURE_PROJECT_ENDPOINT` is set. Mock requires explicit opt-in (`MOCK_LLM=true`). Misconfiguration raises `RuntimeError` |
+| Health endpoint | ✅ Enhanced | Reports `storage: ok\|unreachable\|error\|mock` — confirms real storage reachability post-deploy |
 | QC / signal conditioning stage | ✅ Real | Dominant freq, λ/4 resolution, zero-phase check, amplitude-preserving normalisation |
 | Sliding-window inference engine | ✅ Real | Gaussian overlap-blending, CPU and CUDA |
-| FastAPI backend (13 endpoints) | ✅ Real code | **Defaults to mock mode** (`DEEPSEISMIC_MOCK_MODE=true`); real-mode integration path not fully tested |
-| Foundry agent (11 tools) | ✅ Real code | **Defaults to mock mode** (`MOCK_LLM=true`); real API calls work when `false` |
 | Amplitude volume | ⚠️ Synthetic stand-in | Ricker-wavelet synthetic approximating Volve ST10010 geometry — **not** actual ST10010 amplitudes |
-| Fault labels | ⚠️ Sparse | 18 points → 0.08% positive voxel fraction; adequate for pipeline validation, not a full interpretation |
+| Fault labels | ⚠️ Synthetic proxy (Sprint 3) | 76 picks across 6 synthetic files → 0.30% positive fraction. **NOT real Volve ground truth.** Sprint 2 real sticks: 18 picks → 0.08% |
 | Demo UIs | ℹ️ Pre-baked | Streamlit / Gradio visualise pre-baked inference results from `fault_prob.zarr` |
+
+### Real-data readiness (Sprint 3)
+
+**App-ready (code complete, locally validated as format proxy):**
+- SEG-Y ingest geometry handles ST10010 natively — validated against synthetic SEG-Y as format proxy only
+- Fault label generation accepts a directory of `.dat` files; optional between-pick interpolation
+- Training and evaluation read Zarr from ADLS via `--storage-backend azure`
+- API real mode is now the default; health endpoint confirms storage reachability
+
+**Deploy-gated (execution requires infra + data access):**
+- Real ingest and training must run **in-VNet** — ADLS uses private endpoints (`publicNetworkAccess: Disabled`)
+- Suitable execution environments: Azure ML managed compute, Container App jobs
+
+**Explicit blockers (not code gaps):**
+
+| Blocker | Owner | Tracking |
+|---------|-------|---------|
+| ST10010 SEG-Y copy job into `raw` ADLS container | Spava-Corp/deepseismic2-infra | infra issue #11 |
+| Equinor Volve Databricks Marketplace listing install (identity-bound) | User action | Manual step |
+| Private-endpoint networking — all real ingest/train/eval must run in-VNet | Spava-Corp/deepseismic2-infra | infra issue #11 |
+
+See [docs/real-data-runbook.md](docs/real-data-runbook.md) for the ordered sequence of steps
+once blockers are resolved.
 
 ### Results (Sprint 2, seed=42)
 
@@ -147,7 +175,11 @@ making the label set extremely sparse. Results will differ substantially when ru
 against the full Volve ST10010 post-stack volume with a complete interpretation.
 Reproducibility: seed=42, run config persisted at `checkpoints/run_config.json`.
 
-### Reproduce the real pipeline
+Sprint 3 synthetic-proxy validation used 76 picks (6 synthetic `.dat` files) → 0.30%
+positive-voxel fraction. **⚠️ These are synthetic-proxy numbers only — NOT real Volve
+results.**
+
+### Reproduce the real pipeline (Sprint 2 baseline, local)
 
 ```powershell
 # 1. Generate fault labels from the real Volve fault sticks
@@ -162,11 +194,65 @@ python scripts/evaluate.py --checkpoint checkpoints/best.pt
 #    Writes metrics to output/eval_metrics.json
 ```
 
-### Also implemented (Sprint 1)
+### Sprint 3 — local smoke-test commands (synthetic proxy, NOT real Volve data)
+
+```powershell
+# SEG-Y ingest smoke-test (format proxy only — synthetic SEG-Y, not ST10010)
+# ⚠️  Numbers are NOT from real Volve data.
+python scripts/ingest_segy.py `
+    --source data/volve/synthetic_sample.segy `
+    --dest data/volve/staged/smoke_ingest.zarr `
+    --survey-id synthetic-proxy `
+    --sample-mode --overwrite
+
+# Dense fault labels — synthetic proxy (6 synthetic .dat files)
+# ⚠️  NOT real Volve ground truth.
+python scripts/generate_fault_label.py `
+    --fault-stick-dir data/volve/interpretations/fault_sticks_synth `
+    --interpolate-between
+
+# Real-mode API (requires Azurite or real storage configured)
+# Default is now real mode — set mock only if you explicitly want synthetic responses
+$env:DEEPSEISMIC_MOCK_MODE = "true"   # explicit mock opt-in
+uvicorn deepseismic.api.main:app --reload --port 8000
+
+# Check health / storage reachability
+curl http://localhost:8000/health
+# Returns: {"status":"ok","mock_mode":true,"storage":"mock"}
+# Real mode returns storage: "ok" | "unreachable" | "error"
+```
+
+### In-VNet execution (real ST10010 — requires infra #11 + Marketplace)
+
+See [docs/real-data-runbook.md](docs/real-data-runbook.md) for the full ordered sequence.
+
+```bash
+# Full ingest from ADLS raw container (in-VNet job only)
+python scripts/ingest_segy.py \
+    --source /mnt/raw/ST10010_PSDM_TIME.segy \
+    --dest /mnt/staged/surveys/volve-st10010/amplitude.zarr \
+    --survey-id volve-st10010 --overwrite
+
+# Train on ADLS-staged data (in-VNet only — private endpoint)
+python -m deepseismic.training.train \
+    --data-mode zarr --storage-backend azure \
+    --az-seismic-prefix surveys/volve-st10010/amplitude.zarr \
+    --az-label-prefix surveys/volve-st10010/fault_label.zarr \
+    --epochs 50 --device cuda --seed 42
+
+# Evaluate against ADLS data
+python scripts/evaluate.py \
+    --checkpoint /mnt/features/checkpoints/best.pt \
+    --storage-backend azure \
+    --az-seismic-prefix surveys/volve-st10010/amplitude.zarr \
+    --az-label-prefix surveys/volve-st10010/fault_label.zarr
+```
+
+### Also implemented (Sprints 1–2)
 
 - ✅ SEG-Y ingest → Zarr conversion with metadata sidecars
 - ✅ FastAPI backend (13 endpoints, mock mode supported)
 - ✅ Foundry agent with 11 tools wired to real API
 - ✅ Three demo UIs: terminal chat, Streamlit, Gradio
-- ✅ 156 tests passing + CI workflow
+- ✅ 211 tests passing + CI workflow
 - ✅ Local dev environment (Azurite, Docker, zero-config)

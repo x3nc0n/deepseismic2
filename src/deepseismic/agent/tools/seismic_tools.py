@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
 
 
+def _is_mock() -> bool:
+    """Return True only when MOCK_LLM is explicitly set to a truthy value.
+
+    Checked at call time so the env var can be changed after module import
+    (e.g. test isolation) without reimporting the module.
+    """
+    return os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
+
+
 # ---------------------------------------------------------------------------
 # Mock payloads
 # ---------------------------------------------------------------------------
@@ -143,7 +152,7 @@ def query_survey_metadata(
         ``name``, ``formats``, ``inline_range``, ``crossline_range``, ``status``,
         and ``manifest_path``.
     """
-    if MOCK_MODE:
+    if _is_mock():
         surveys = _MOCK_SURVEY_METADATA["surveys"]
         if survey_name:
             surveys = [
@@ -182,7 +191,7 @@ def get_inline_section(survey_id: str, inline_number: int) -> dict[str, Any]:
         dict with ``inline``, ``amplitude_stats``, ``anomaly_zones``, and
         ``zarr_chunk_path`` reference for downstream array access.
     """
-    if MOCK_MODE:
+    if _is_mock():
         return {**_MOCK_INLINE_SECTION, "inline": inline_number, "survey_id": survey_id}
     try:
         return _api_get(f"/api/surveys/{survey_id}/inline/{inline_number}")
@@ -213,7 +222,7 @@ def run_fault_detection(
         ``estimated_minutes``. Pass ``job_id`` to ``get_interpretation_status``
         to poll completion.
     """
-    if MOCK_MODE:
+    if _is_mock():
         return {**_MOCK_FAULT_DETECTION, "survey_id": survey_id, "model": model_version}
 
     payload: dict[str, Any] = {"survey_id": survey_id}
@@ -244,7 +253,7 @@ def get_interpretation_status(run_id: str) -> dict[str, Any]:
         dict with ``status``, ``started_at``, ``completed_at``,
         ``duration_minutes``, ``qc_artifacts``, ``result_id``, and ``caveats``.
     """
-    if MOCK_MODE:
+    if _is_mock():
         return {**_MOCK_INTERP_STATUS, "run_id": run_id}
     try:
         return _api_get(f"/api/interpretation/{run_id}/status")

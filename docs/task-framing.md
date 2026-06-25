@@ -102,6 +102,13 @@ Sprint 2 addressed the synthetic-data problem: we now train on real Volve fault-
 labels. The task-mismatch framing documented here remains a permanent architectural
 fact — not a gap to close, but a context every reader must have.
 
+Sprint 3 made the label pipeline **directory-based** (any number of `.dat` files) and
+added optional between-pick interpolation (`--interpolate-between`). Validated with a
+synthetic proxy set (6 files, 76 picks → 0.30% positive-voxel fraction). Real Volve
+interpretation data is blocked on the Databricks Marketplace install (infra #11). The
+0.30% proxy number is **not** a real Volve result — it is a format-and-code-path
+validation proxy only. Expected positive fraction with full real interpretation: ≥ 1–3%.
+
 ---
 
 ## Summary
@@ -110,7 +117,7 @@ fact — not a gap to close, but a context every reader must have.
 |-----------|-------------------------------|--------------|
 | Task | Multi-class facies segmentation | Binary fault detection |
 | Dataset | F3 Netherlands, Penobscot | Equinor Volve (ST10010 geometry) |
-| Labels | Dense pixel-complete contest annotations | Sparse fault sticks (18 points, 2 files) |
+| Labels | Dense pixel-complete contest annotations | Sparse fault sticks (18 real picks, 2 files; Sprint 3 synthetic proxy: 76 picks, 6 files → 0.30% positive fraction) |
 | Output | Per-voxel class assignment (N classes) | Per-voxel fault probability (0–1) |
 | Primary metrics | mIoU, pixel accuracy per class | Binary IoU, Dice, distance-tolerant recall |
 | Benchmark lineage | F3/Penobscot ML contest baselines | FaultSeg3D (Wu et al. 2019) and related |

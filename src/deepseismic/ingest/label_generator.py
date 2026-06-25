@@ -29,7 +29,10 @@ Usage
     )
     from deepseismic.ingest.segy_loader import load_segy
 
-    _, geom = load_segy("data/raw/ST10010.segy", sample_mode=True)
+    # SEG-Y path is supplied by the caller — not hard-coded here.
+    # For local dev use the synthetic proxy; for real data supply --source arg.
+    segy_path = "path/to/your/survey.segy"   # e.g. ST10010_PSDM_TIME.segy
+    _, geom = load_segy(segy_path, sample_mode=True)
 
     # Build transform from three known tie-points (x, y, inline, crossline)
     transform = SurveyTransform.from_three_points(
@@ -270,6 +273,76 @@ def parse_petrel_fault_sticks(
     return sticks
 
 
+def densify_stick_to_il_resolution(
+    pts: list[tuple[float, float, float]],
+    max_il_gap: int = 5,
+) -> list[tuple[float, float, float]]:
+    """Insert 1-IL-resolution interpolated picks between sparse fault picks.
+
+    Geophysical assumption
+    ----------------------
+    Fault geometry is approximately planar between adjacent interpreted sticks.
+    Linearly interpolating XL and Z at each intermediate IL position is valid
+    when the inline gap is small (≤ ``max_il_gap``).  Larger gaps may represent
+    fault segmentation, an interpretation gap, or a data break — these are NOT
+    bridged, preserving the interpreter's intent.
+
+    Resolution guardrail
+    --------------------
+    λ/4 at 36.6 Hz with v = 2 000 m/s ≈ 13.7 m ≈ 3.4 samples (4 ms/sample).
+    Rasterising at 1-IL steps ensures the label band is never thinner than the
+    minimum resolvable feature.  Dilation (default 3 voxels ≈ 12 ms ≈ ~24 m)
+    adds positional uncertainty appropriate for sparse stick spacing.
+
+    Uncertainty note
+    ----------------
+    Interpolated picks are INFERRED labels, not interpreter-picked ground truth.
+    For an original step-5 fault, 4 out of every 5 painted ILs are interpolated
+    (~80 % inferred).  Label confidence is proportionally lower at interpolated
+    positions.  Quantify this in QC reports; never present interpolated labels
+    as equivalent to direct picks.
+
+    Parameters
+    ----------
+    pts:
+        List of ``(il_idx, xl_idx, z_idx)`` tuples (0-based index space).
+        Need not be sorted — the function sorts by IL internally.
+    max_il_gap:
+        Maximum inline gap (in IL index units) to bridge with interpolation.
+        Default 5.  Gaps strictly greater than this value are left unconnected.
+
+    Returns
+    -------
+    list[tuple[float, float, float]]
+        Densified list sorted by IL, with 1-IL-step picks inserted in every
+        gap whose width is in the range ``(1, max_il_gap]``.
+    """
+    if len(pts) < 2:
+        return list(pts)
+
+    sorted_pts = sorted(pts, key=lambda p: p[0])
+    densified: list[tuple[float, float, float]] = []
+
+    for i, (il0, xl0, z0) in enumerate(sorted_pts[:-1]):
+        il1, xl1, z1 = sorted_pts[i + 1]
+        il_gap = il1 - il0
+
+        densified.append((il0, xl0, z0))
+
+        if 1.0 < il_gap <= max_il_gap:
+            n_steps = round(il_gap)
+            for k in range(1, n_steps):
+                t = k / n_steps
+                densified.append((
+                    il0 + t * (il1 - il0),
+                    xl0 + t * (xl1 - xl0),
+                    z0  + t * (z1  - z0),
+                ))
+
+    densified.append(sorted_pts[-1])
+    return densified
+
+
 def parse_opendtect_fault_sticks(path: str | Path) -> list[FaultStick]:
     """Parse an OpendTect ASCII fault export.
 
@@ -411,15 +484,61 @@ class FaultMaskGenerator:
     def add_fault_sticks_in_index_space(
         self,
         sticks_indexed: list[list[tuple[float, float, float]]],
+        *,
+        interpolate_between: bool = False,
+        max_interp_gap_il: int = 5,
     ) -> None:
         """Add pre-indexed sticks given as ``(il_idx, xl_idx, s_idx)`` triplets.
 
         Useful when caller has already mapped to voxel coordinates (e.g., when
         fault sticks are provided in inline/crossline/sample from an
         interpretation workstation that exports grid coordinates directly).
+
+        Parameters
+        ----------
+        sticks_indexed:
+            Each element is one fault's list of ``(il_idx, xl_idx, s_idx)``
+            picks in 0-based index space.
+        interpolate_between:
+            If ``True``, apply :func:`densify_stick_to_il_resolution` to each
+            stick before rasterising.  This inserts 1-IL-resolution picks
+            between sparse picks (gap ≤ ``max_interp_gap_il``), increasing the
+            positive-voxel fraction by connecting interpreted sticks across
+            the inline gap.
+
+            **Geophysical justification:** planar-fault assumption between
+            adjacent sticks.  Only valid for gaps ≤ ``max_interp_gap_il``.
+
+            **Uncertainty:** interpolated picks are INFERRED, not picked.
+            Treat the resulting labels as lower-confidence ground truth at
+            intermediate IL positions.
+        max_interp_gap_il:
+            Maximum IL gap to bridge when ``interpolate_between=True``.
+            Default 5.  Gaps > this are left as-is (possible fault segment
+            boundary or interpretation gap).
         """
+        raw_count = sum(len(s) for s in sticks_indexed)
+        densified_count = 0
+
         for stick_pts in sticks_indexed:
-            self._rasterise_stick(stick_pts)
+            pts_to_raster: list[tuple[float, float, float]] = list(stick_pts)
+            if interpolate_between and len(stick_pts) >= 2:
+                pts_to_raster = densify_stick_to_il_resolution(
+                    pts_to_raster, max_il_gap=max_interp_gap_il,
+                )
+            densified_count += len(pts_to_raster)
+            self._rasterise_stick(pts_to_raster)
+
+        if interpolate_between:
+            logger.info(
+                "Rasterised %d sticks — raw picks: %d → densified picks: %d → %d labelled voxels",
+                len(sticks_indexed), raw_count, densified_count, int(self._mask.sum()),
+            )
+        else:
+            logger.info(
+                "Rasterised %d sticks → %d labelled voxels",
+                len(sticks_indexed), int(self._mask.sum()),
+            )
 
     def to_zarr(
         self,

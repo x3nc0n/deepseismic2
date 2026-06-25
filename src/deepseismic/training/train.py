@@ -63,6 +63,15 @@ class TrainConfig:
     # S2-05: reproducibility seed
     seed: int = 42
 
+    # S3-06: storage backend — "local" (default) | "azure" (ADLS via ABSZarrV3Store)
+    storage_backend: str = "local"
+    # Azure ADLS container + prefix for each Zarr artifact.
+    # Convention (infra #11): staged/surveys/{survey_id}/amplitude.zarr
+    az_seismic_container: str = "staged"
+    az_seismic_prefix: str = "surveys/volve-st10010/amplitude.zarr"
+    az_label_container: str = "staged"
+    az_label_prefix: str = "surveys/volve-st10010/fault_label.zarr"
+
 
 def generate_synthetic_training_data(
     output_dir: Path,
@@ -443,10 +452,22 @@ def _build_zarr_loaders(
         * Dice loss adds precision pressure — penalises predicting fault everywhere.
     This combination avoids the all-positive collapse from BCE-only high pos_weight
     while still driving recall on the sparse fault class.
+
+    S3-06: storage backend selection
+    ---------------------------------
+    ``config.storage_backend="local"`` (default) reads from ``config.seismic_zarr``
+    and ``config.label_zarr`` on the local filesystem.
+
+    ``config.storage_backend="azure"`` reads from ADLS via ABSZarrV3Store, using
+    ``config.az_seismic_container / az_seismic_prefix`` and the corresponding
+    label fields.  Requires ``STORAGE_CONNECTION_STRING`` or
+    ``AZURE_STORAGE_ACCOUNT`` to be set in the environment.
     """
+    import zarr as _zarr
     from torch.utils.data import WeightedRandomSampler
 
     from deepseismic.preprocessing.patches import PatchConfig, PatchDataset, Split
+    from deepseismic.storage.zarr_helpers import open_zarr_root
 
     patch_cfg = PatchConfig(
         patch_size=config.patch_size,
@@ -454,15 +475,44 @@ def _build_zarr_loaders(
         min_fault_fraction=0.0,  # include ALL patches (negative + positive)
     )
 
+    # Open zarr roots — local or ADLS depending on backend
+    if config.storage_backend == "azure":
+        logger.info(
+            "Storage backend: azure  seismic=%s/%s  label=%s/%s",
+            config.az_seismic_container, config.az_seismic_prefix,
+            config.az_label_container, config.az_label_prefix,
+        )
+        seismic_root = open_zarr_root(
+            None, backend="azure",
+            az_container=config.az_seismic_container,
+            az_prefix=config.az_seismic_prefix,
+        )
+        label_root = open_zarr_root(
+            None, backend="azure",
+            az_container=config.az_label_container,
+            az_prefix=config.az_label_prefix,
+        )
+    else:
+        logger.info(
+            "Storage backend: local  seismic=%s  label=%s",
+            config.seismic_zarr, config.label_zarr,
+        )
+        seismic_root = open_zarr_root(config.seismic_zarr, backend="local")
+        label_root   = open_zarr_root(config.label_zarr,   backend="local")
+
+    seismic_arr: _zarr.Array = seismic_root["amplitude"]
+    label_arr:   _zarr.Array = label_root["fault_mask"]
+
+    # Pass zarr.Array objects directly so PatchDataset doesn't re-open the store
     train_ds = PatchDataset(
-        config.seismic_zarr,
-        config.label_zarr,
+        seismic_arr,
+        label_arr,
         config=patch_cfg,
         split=Split.TRAIN,
     )
     val_ds = PatchDataset(
-        config.seismic_zarr,
-        config.label_zarr,
+        seismic_arr,
+        label_arr,
         config=patch_cfg,
         split=Split.VAL,
     )
@@ -474,16 +524,13 @@ def _build_zarr_loaders(
 
     # Build fault-aware sampling weights: scan label zarr for each train patch.
     # Fault patches get 50× weight → ~1-2 fault patches per batch of 4 on average.
-    import zarr as _zarr
-    _label_root = _zarr.open_group(str(config.label_zarr), mode="r")
-    _fault_arr = _label_root["fault_mask"]
     ps = config.patch_size
 
     sample_weights: list[float] = []
     n_fault_patches = 0
     for p in train_ds._patches:
         lbl_sum = int(
-            _fault_arr[
+            label_arr[
                 p.il_start : p.il_start + ps[0],
                 p.xl_start : p.xl_start + ps[1],
                 p.s_start  : p.s_start  + ps[2],
@@ -618,6 +665,37 @@ def main() -> None:
         "--checkpoint-dir", default="checkpoints",
         help="Directory for checkpoints and run_config.json",
     )
+    # S3-06: storage backend
+    parser.add_argument(
+        "--storage-backend", choices=["local", "azure"], default="local",
+        help=(
+            "Zarr storage backend: local (default) reads from filesystem; "
+            "azure reads from ADLS via ABSZarrV3Store (requires "
+            "STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT env var)."
+        ),
+    )
+    parser.add_argument(
+        "--az-seismic-container", default="staged",
+        help="Azure container for seismic amplitude Zarr (default: staged)",
+    )
+    parser.add_argument(
+        "--az-seismic-prefix", default="surveys/volve-st10010/amplitude.zarr",
+        help=(
+            "Azure blob prefix for seismic amplitude Zarr "
+            "(default: surveys/volve-st10010/amplitude.zarr)"
+        ),
+    )
+    parser.add_argument(
+        "--az-label-container", default="staged",
+        help="Azure container for fault label Zarr (default: staged)",
+    )
+    parser.add_argument(
+        "--az-label-prefix", default="surveys/volve-st10010/fault_label.zarr",
+        help=(
+            "Azure blob prefix for fault label Zarr "
+            "(default: surveys/volve-st10010/fault_label.zarr)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -647,6 +725,11 @@ def main() -> None:
         pos_weight=pos_weight,
         seed=args.seed,
         checkpoint_dir=Path(args.checkpoint_dir),
+        storage_backend=args.storage_backend,
+        az_seismic_container=args.az_seismic_container,
+        az_seismic_prefix=args.az_seismic_prefix,
+        az_label_container=args.az_label_container,
+        az_label_prefix=args.az_label_prefix,
     )
 
     train(config)

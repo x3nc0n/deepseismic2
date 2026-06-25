@@ -22,7 +22,6 @@ import logging
 from pathlib import Path
 
 import numpy as np
-import zarr
 
 from deepseismic.models.inference import VolumeInference
 from deepseismic.validation import evaluate_model
@@ -41,6 +40,11 @@ def run_evaluation(
     device: str = "cpu",
     il_start: int = 64,
     il_end: int = 100,
+    storage_backend: str = "local",
+    az_seismic_container: str = "staged",
+    az_seismic_prefix: str = "surveys/volve-st10010/amplitude.zarr",
+    az_label_container: str = "staged",
+    az_label_prefix: str = "surveys/volve-st10010/fault_label.zarr",
 ) -> dict:
     """Run full-volume inference on a held-out region and compute metrics.
 
@@ -49,9 +53,11 @@ def run_evaluation(
     checkpoint_path:
         Path to a UNet3D .pt checkpoint.
     seismic_zarr:
-        Zarr store containing 'amplitude' array, shape (n_il, n_xl, n_s).
+        Local Zarr store containing 'amplitude' array, shape (n_il, n_xl, n_s).
+        Used when ``storage_backend="local"``.
     label_zarr:
-        Zarr store containing 'fault_mask' array, same shape.
+        Local Zarr store containing 'fault_mask' array, same shape.
+        Used when ``storage_backend="local"``.
     output_path:
         JSON output path for metrics.
     patch_size:
@@ -65,18 +71,43 @@ def run_evaluation(
     il_start, il_end:
         Inline range for the evaluation region (0-based indices).
         Default (70–100) covers the val+test split (70/15/15 inline split).
+    storage_backend:
+        ``"local"`` (default) or ``"azure"``.  When ``"azure"``, reads from
+        ADLS using ``az_seismic_container / az_seismic_prefix`` (and label
+        equivalents) via ABSZarrV3Store.
+    az_seismic_container, az_seismic_prefix:
+        Azure blob location for seismic amplitude Zarr.
+    az_label_container, az_label_prefix:
+        Azure blob location for fault label Zarr.
 
     Returns
     -------
     dict with all computed metric values.
     """
-    # --- Load data ---------------------------------------------------------
-    logger.info("Opening seismic zarr: %s", seismic_zarr)
-    seismic_root = zarr.open_group(str(seismic_zarr), mode="r")
-    amplitude = seismic_root["amplitude"]
+    from deepseismic.storage.zarr_helpers import open_zarr_root
 
-    logger.info("Opening label zarr: %s", label_zarr)
-    label_root = zarr.open_group(str(label_zarr), mode="r")
+    # --- Load data ---------------------------------------------------------
+    if storage_backend == "azure":
+        logger.info(
+            "Storage backend: azure  seismic=%s/%s  label=%s/%s",
+            az_seismic_container, az_seismic_prefix,
+            az_label_container, az_label_prefix,
+        )
+        seismic_root = open_zarr_root(
+            None, backend="azure",
+            az_container=az_seismic_container, az_prefix=az_seismic_prefix,
+        )
+        label_root = open_zarr_root(
+            None, backend="azure",
+            az_container=az_label_container, az_prefix=az_label_prefix,
+        )
+    else:
+        logger.info("Opening seismic zarr: %s", seismic_zarr)
+        seismic_root = open_zarr_root(seismic_zarr, backend="local")
+        logger.info("Opening label zarr: %s", label_zarr)
+        label_root = open_zarr_root(label_zarr, backend="local")
+
+    amplitude = seismic_root["amplitude"]
     fault_mask_arr = label_root["fault_mask"]
 
     n_il = amplitude.shape[0]
@@ -203,6 +234,37 @@ def main() -> None:
         "--il-end", type=int, default=100,
         help="Inline end (exclusive, 0-based) for evaluation region (default: 100)",
     )
+    # S3-06: storage backend
+    parser.add_argument(
+        "--storage-backend", choices=["local", "azure"], default="local",
+        help=(
+            "Zarr storage backend: local (default) reads from filesystem; "
+            "azure reads from ADLS via ABSZarrV3Store (requires "
+            "STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT env var)."
+        ),
+    )
+    parser.add_argument(
+        "--az-seismic-container", default="staged",
+        help="Azure container for seismic amplitude Zarr (default: staged)",
+    )
+    parser.add_argument(
+        "--az-seismic-prefix", default="surveys/volve-st10010/amplitude.zarr",
+        help=(
+            "Azure blob prefix for seismic amplitude Zarr "
+            "(default: surveys/volve-st10010/amplitude.zarr)"
+        ),
+    )
+    parser.add_argument(
+        "--az-label-container", default="staged",
+        help="Azure container for fault label Zarr (default: staged)",
+    )
+    parser.add_argument(
+        "--az-label-prefix", default="surveys/volve-st10010/fault_label.zarr",
+        help=(
+            "Azure blob prefix for fault label Zarr "
+            "(default: surveys/volve-st10010/fault_label.zarr)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -222,6 +284,11 @@ def main() -> None:
         device=args.device,
         il_start=args.il_start,
         il_end=args.il_end,
+        storage_backend=args.storage_backend,
+        az_seismic_container=args.az_seismic_container,
+        az_seismic_prefix=args.az_seismic_prefix,
+        az_label_container=args.az_label_container,
+        az_label_prefix=args.az_label_prefix,
     )
 
 

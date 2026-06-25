@@ -178,7 +178,7 @@ def _run_ingest(run_id: str, req: IngestRequest, storage: Any) -> None:
                 sample_mode=req.sample_mode,
                 sample_n_inlines=req.sample_n_inlines,
             ) as ldr:
-                _, meta = ldr.to_zarr(zarr_path, overwrite=True)
+                _, meta = ldr.to_zarr(zarr_path, overwrite=True, survey_id=req.survey_id)
 
             # Upload Zarr amplitude store to staged container
             local_store = zarr.storage.LocalStore(str(zarr_path))
@@ -212,14 +212,14 @@ def _run_ingest(run_id: str, req: IngestRequest, storage: Any) -> None:
 @router.get("", response_model=list[SurveyListItem])
 def list_surveys(storage: StorageClientDep) -> list[SurveyListItem]:
     """List all ingested surveys in the catalog."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_survey_list()
 
     try:
         blobs = storage.list_blobs("catalog", prefix="surveys/")
     except Exception as exc:
-        logger.warning("Could not list surveys from storage: %s", exc)
-        return _mock_survey_list()
+        logger.error("Could not list surveys from storage: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Storage unavailable: {exc}") from exc
 
     seen: set[str] = set()
     items: list[SurveyListItem] = []
@@ -268,7 +268,7 @@ def ingest_survey(
         "error": None,
     }
 
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         _ingest_jobs[run_id]["status"] = "complete"
         logger.info("Mock ingest for survey=%s run_id=%s", req.survey_id, run_id)
     else:
@@ -285,7 +285,7 @@ def ingest_survey(
 @router.get("/{survey_id}", response_model=SurveyMetadata)
 def get_survey(survey_id: str, storage: StorageClientDep) -> SurveyMetadata:
     """Return the JSON sidecar metadata for a survey."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_survey_metadata(survey_id)
 
     blob_path = f"surveys/{survey_id}/metadata.json"
@@ -315,7 +315,7 @@ def get_survey(survey_id: str, storage: StorageClientDep) -> SurveyMetadata:
 @router.get("/{survey_id}/inline/{number}", response_model=InlineSlice)
 def get_inline(survey_id: str, number: int, storage: StorageClientDep) -> InlineSlice:
     """Return an inline section as amplitude arrays (crossline × time)."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_inline_slice(survey_id, number)
 
     try:
@@ -353,7 +353,7 @@ def get_crossline(
     survey_id: str, number: int, storage: StorageClientDep
 ) -> CrosslineSlice:
     """Return a crossline section as amplitude arrays (inline × time)."""
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         return _mock_crossline_slice(survey_id, number)
 
     try:

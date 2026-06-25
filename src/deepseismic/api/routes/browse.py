@@ -124,7 +124,7 @@ def browse_container(
     if container not in CONTAINERS:
         raise HTTPException(404, f"Container '{container}' not recognized. Valid: {CONTAINERS}")
 
-    if is_mock_mode() or storage is None:
+    if is_mock_mode():
         mock_container = _MOCK_TREE.get(container, {})
         items = mock_container.get(prefix, [])
         return BrowseResponse(container=container, prefix=prefix, items=items)

@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
 
 
+def _is_mock() -> bool:
+    """Return True only when MOCK_LLM is explicitly set to a truthy value.
+
+    Checked at call time so the env var can be changed after module import
+    (e.g. test isolation) without reimporting the module.
+    """
+    return os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
+
+
 # ---------------------------------------------------------------------------
 # Mock payloads — Volve field reference data
 # ---------------------------------------------------------------------------
@@ -245,7 +254,7 @@ def get_well_data(
         ``type``, ``status``, ``td_m_tvdss``, ``surface_latitude``,
         ``surface_longitude``, ``log_curves``, and ``linked_survey``.
     """
-    if MOCK_MODE:
+    if _is_mock():
         wells = list(_MOCK_WELLS)
         if well_id:
             wells = [
@@ -297,7 +306,7 @@ def get_formation_tops(well_id: str, formation: str | None = None) -> dict[str, 
         ``primary_seal``. Each top contains ``formation``, ``top_m_tvdss``,
         ``top_m_md``, ``lithology``, and ``age``.
     """
-    if MOCK_MODE:
+    if _is_mock():
         tops = list(_MOCK_FORMATION_TOPS_1B)
         if formation:
             tops = [t for t in tops if formation.lower() in t["formation"].lower()]
@@ -342,7 +351,7 @@ def correlate_wells(well_ids: list[str], formation: str = "Hugin") -> dict[str, 
         dict with per-well tops, ``depth_range_m_tvdss``, ``depth_variation_m``,
         ``structural_trend`` description, and ``seismic_reflector_tie`` in TWT.
     """
-    if MOCK_MODE:
+    if _is_mock():
         corr = dict(_MOCK_HUGIN_CORRELATION)
         corr["formation"] = formation
         if well_ids:
@@ -421,7 +430,7 @@ def get_regional_context(field_name: str = "Volve") -> dict[str, Any]:
         ``primary_seal``, ``structural_trap``, ``production_period``, and
         ``data_license``.
     """
-    if MOCK_MODE:
+    if _is_mock():
         return _MOCK_REGIONAL_CONTEXT
     # Regional context is a knowledge-base lookup, not backed by a live API endpoint.
     # Return the embedded reference data so the LLM always has geological context.

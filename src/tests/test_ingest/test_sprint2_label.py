@@ -1,10 +1,12 @@
-"""Sprint 2 S2-01 tests: fault-label generation coordinate mapping and rasterisation.
+"""Sprint 2 S2-01 / Sprint 3 S3-#8 tests: fault-label generation.
 
 Critical coverage:
 - Coordinate mapping correctness (highest-risk logic: il/xl 0-based index, z_col=sample index)
 - FaultMaskGenerator output dtype/shape/values
 - Dilation monotonicity
 - load_volve_fault_sticks parsing from synthetic .dat fixtures
+- densify_stick_to_il_resolution (S3-#8): interpolation correctness & guardrails
+- add_fault_sticks_in_index_space with interpolate_between=True (S3-#8)
 
 Synthetic .dat fixtures only — no dependency on real data files.
 """
@@ -18,7 +20,7 @@ import pytest
 import zarr
 import zarr.storage
 
-from deepseismic.ingest.label_generator import FaultMaskGenerator
+from deepseismic.ingest.label_generator import FaultMaskGenerator, densify_stick_to_il_resolution
 from deepseismic.validation import load_volve_fault_sticks
 
 # ---------------------------------------------------------------------------
@@ -230,3 +232,176 @@ class TestLabelZarrOutput:
         root = zarr.open_group(store, mode="r")
         stored = np.array(root["fault_mask"])
         np.testing.assert_array_equal(stored, gen.mask)
+
+
+# ---------------------------------------------------------------------------
+# S3-#8: densify_stick_to_il_resolution
+# ---------------------------------------------------------------------------
+
+
+class TestDensifyStickToIlResolution:
+    """Tests for the between-stick IL densification function.
+
+    Geophysical context: fault picks are often every 3–10 ILs.  Inserting
+    1-IL interpolated picks (where gap ≤ max_il_gap) creates a continuous
+    fault label band — a INFERRED extension of the interpreter's intent,
+    not new ground truth.
+    """
+
+    def test_basic_two_point_gap_4(self):
+        """IL gap of 4 with max_gap=5 → 3 intermediate picks inserted."""
+        pts = [(0.0, 10.0, 200.0), (4.0, 14.0, 204.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        # Expected: IL 0,1,2,3,4 → 5 points
+        ils = [p[0] for p in result]
+        assert ils == pytest.approx([0.0, 1.0, 2.0, 3.0, 4.0])
+
+    def test_xl_z_linearly_interpolated(self):
+        """XL and Z must be linearly interpolated at intermediate IL positions."""
+        pts = [(0.0, 10.0, 200.0), (4.0, 14.0, 204.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        # At IL=2 (midpoint): XL=12, Z=202
+        mid = result[2]
+        assert mid[0] == pytest.approx(2.0)
+        assert mid[1] == pytest.approx(12.0)
+        assert mid[2] == pytest.approx(202.0)
+
+    def test_gap_exceeds_max_not_bridged(self):
+        """Gap > max_il_gap → no intermediate points inserted."""
+        pts = [(0.0, 10.0, 200.0), (10.0, 20.0, 210.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        # Only the two original points
+        assert len(result) == 2
+        assert result[0][0] == pytest.approx(0.0)
+        assert result[1][0] == pytest.approx(10.0)
+
+    def test_gap_exactly_at_max_is_bridged(self):
+        """Gap == max_il_gap → intermediate points ARE inserted."""
+        pts = [(0.0, 10.0, 200.0), (5.0, 15.0, 205.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        # Gap=5 ≤ max_gap=5 → 4 intermediate points → 6 total
+        assert len(result) == 6
+
+    def test_already_dense_no_change(self):
+        """Points at IL=0,1,2 (gap=1) → no new points inserted."""
+        pts = [(0.0, 10.0, 200.0), (1.0, 11.0, 201.0), (2.0, 12.0, 202.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        assert len(result) == 3
+
+    def test_single_point_returned_unchanged(self):
+        """Single point → returned as-is (no interpolation possible)."""
+        pts = [(5.0, 30.0, 150.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        assert len(result) == 1
+        assert result[0] == pytest.approx((5.0, 30.0, 150.0))
+
+    def test_unsorted_input_sorted_by_il(self):
+        """Input in reverse IL order → output sorted ascending by IL."""
+        pts = [(4.0, 14.0, 204.0), (0.0, 10.0, 200.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        ils = [p[0] for p in result]
+        assert ils == sorted(ils)
+        assert ils[0] == pytest.approx(0.0)
+        assert ils[-1] == pytest.approx(4.0)
+
+    def test_mixed_gaps_bridged_selectively(self):
+        """Multi-segment: only gaps ≤ max_gap are bridged."""
+        # Gap 0→3 = 3 (≤5, bridged), gap 3→15 = 12 (>5, not bridged)
+        pts = [(0.0, 0.0, 0.0), (3.0, 3.0, 3.0), (15.0, 15.0, 15.0)]
+        result = densify_stick_to_il_resolution(pts, max_il_gap=5)
+        ils = [p[0] for p in result]
+        # First gap (3): ILs 0,1,2,3 → 4 points; second gap (12): no interp
+        assert 0.0 in ils
+        assert 1.0 in ils
+        assert 2.0 in ils
+        assert 3.0 in ils
+        assert 15.0 in ils
+        # No interpolated ILs between 3 and 15
+        assert not any(3.0 < il < 15.0 for il in ils)
+
+
+# ---------------------------------------------------------------------------
+# S3-#8: add_fault_sticks_in_index_space with interpolate_between
+# ---------------------------------------------------------------------------
+
+
+class TestInterpolateBetweenSticks:
+    """Tests for the interpolate_between parameter of add_fault_sticks_in_index_space."""
+
+    def test_interpolate_between_api_valid_binary_mask(self):
+        """interpolate_between=True API works; mask is valid binary and non-empty."""
+        sticks = [[(0.0, 5.0, 10.0), (4.0, 5.0, 10.0), (8.0, 5.0, 10.0)]]
+        gen = FaultMaskGenerator(
+            volume_shape=(12, 12, 20),
+            inline_range=(0, 11, 1),
+            crossline_range=(0, 11, 1),
+            sample_rate_ms=4.0,
+            datum_ms=0.0,
+            dilation_voxels=0,
+        )
+        gen.add_fault_sticks_in_index_space(sticks, interpolate_between=True, max_interp_gap_il=5)
+        assert gen.mask.sum() > 0
+        assert set(np.unique(gen.mask)).issubset({0, 1})
+
+    def test_interpolate_between_result_ge_baseline(self):
+        """interpolate_between=True must produce ≥ as many voxels as False.
+
+        For linear fault geometry the arc-length rasteriser already covers
+        all intermediate ILs regardless of densification.  Densification
+        guarantees coverage for curved geometry and explicit IL documentation,
+        but must never produce FEWER voxels than the baseline.
+        """
+        sticks = [[(0.0, 5.0, 10.0), (4.0, 5.0, 10.0), (8.0, 5.0, 10.0)]]
+
+        gen_base = FaultMaskGenerator(
+            volume_shape=(20, 20, 30),
+            inline_range=(0, 19, 1),
+            crossline_range=(0, 19, 1),
+            sample_rate_ms=4.0,
+            datum_ms=0.0,
+            dilation_voxels=0,
+        )
+        gen_base.add_fault_sticks_in_index_space(sticks, interpolate_between=False)
+
+        gen_interp = FaultMaskGenerator(
+            volume_shape=(20, 20, 30),
+            inline_range=(0, 19, 1),
+            crossline_range=(0, 19, 1),
+            sample_rate_ms=4.0,
+            datum_ms=0.0,
+            dilation_voxels=0,
+        )
+        gen_interp.add_fault_sticks_in_index_space(
+            sticks, interpolate_between=True, max_interp_gap_il=5,
+        )
+
+        assert gen_interp.mask.sum() >= gen_base.mask.sum(), (
+            "interpolate_between=True must never label fewer voxels than False"
+        )
+
+    def test_interpolate_between_false_unchanged(self):
+        """interpolate_between=False must produce identical result to original call."""
+        sticks = [[(2.0, 3.0, 5.0), (6.0, 7.0, 9.0)]]
+
+        gen1 = _make_gen(shape=(15, 15, 20), dilation=0)
+        gen1.add_fault_sticks_in_index_space(sticks)
+
+        gen2 = _make_gen(shape=(15, 15, 20), dilation=0)
+        gen2.add_fault_sticks_in_index_space(sticks, interpolate_between=False)
+
+        np.testing.assert_array_equal(gen1.mask, gen2.mask)
+
+    def test_gap_exceeds_max_no_extra_voxels(self):
+        """When gap > max_interp_gap_il, no additional voxels from interpolation."""
+        # Gap of 20 IL >> max_interp_gap_il=5
+        sticks = [[(0.0, 5.0, 10.0), (20.0, 5.0, 10.0)]]
+
+        gen_base = _make_gen(shape=(30, 15, 20), dilation=0)
+        gen_base.add_fault_sticks_in_index_space(sticks, interpolate_between=False)
+
+        gen_interp = _make_gen(shape=(30, 15, 20), dilation=0)
+        gen_interp.add_fault_sticks_in_index_space(
+            sticks, interpolate_between=True, max_interp_gap_il=5,
+        )
+
+        np.testing.assert_array_equal(gen_base.mask, gen_interp.mask)

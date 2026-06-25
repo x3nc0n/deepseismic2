@@ -21,13 +21,22 @@ Usage
 -----
     from deepseismic.ingest.segy_loader import segy_to_zarr
 
+    # Local smoke-ingest of first 50 inlines (cheap, format-proxy only):
     meta = segy_to_zarr(
-        "data/raw/ST10010_PSDM_TIME.segy",
-        "data/staged/ST10010.zarr",
+        "path/to/ST10010_PSDM_TIME.segy",          # supply via --source arg
+        "staged/surveys/volve-st10010/amplitude.zarr",
+        survey_id="volve-st10010",
         sample_mode=True,
         sample_n_inlines=50,
     )
     print(meta.geometry["n_inlines"], meta.amplitude_stats["p99"])
+
+    # Full ingest (in-VNet, real ST10010 geometry: inlines 9985–10369):
+    meta = segy_to_zarr(
+        "/mnt/raw/ST10010_PSDM_TIME.segy",
+        "staged/surveys/volve-st10010/amplitude.zarr",
+        survey_id="volve-st10010",
+    )
 """
 
 from __future__ import annotations
@@ -107,6 +116,7 @@ class IngestMetadata:
     source_file: str
     source_sha256: str | None
     ingested_at: str
+    survey_id: str | None
     sample_mode: bool
     n_inlines_loaded: int
     geometry: dict
@@ -240,6 +250,7 @@ class SEGYLoader:
         chunks: tuple[int, int, int] = DEFAULT_CHUNKS,
         *,
         overwrite: bool = False,
+        survey_id: str | None = None,
     ) -> tuple[zarr.Array, IngestMetadata]:
         """Load the SEG-Y and write a chunked Zarr store plus a JSON sidecar.
 
@@ -251,6 +262,10 @@ class SEGYLoader:
             Chunk shape ``(inline, crossline, sample)``.
         overwrite:
             Overwrite an existing store.
+        survey_id:
+            Optional identifier embedded in the JSON sidecar
+            (e.g. ``"volve-st10010"``).  Allows downstream pipeline stages
+            to verify they are consuming the correct survey artifact.
 
         Returns
         -------
@@ -291,6 +306,7 @@ class SEGYLoader:
             source_file=src_name,
             source_sha256=sha256,
             ingested_at=datetime.now(UTC).isoformat(),
+            survey_id=survey_id,
             sample_mode=self.sample_mode,
             n_inlines_loaded=amplitude.shape[0],
             geometry=geom.to_dict(),
@@ -448,6 +464,7 @@ def segy_to_zarr(
     source: str | Path,
     dest: str | Path,
     *,
+    survey_id: str | None = None,
     chunks: tuple[int, int, int] = DEFAULT_CHUNKS,
     sample_mode: bool = False,
     sample_n_inlines: int = 50,
@@ -460,11 +477,16 @@ def segy_to_zarr(
     source:
         Path to the source SEG-Y file.
     dest:
-        Destination Zarr directory (e.g. ``staged/ST10010.zarr``).
+        Destination Zarr directory (e.g. ``staged/surveys/volve-st10010/amplitude.zarr``).
+    survey_id:
+        Optional survey identifier embedded in the JSON sidecar
+        (e.g. ``"volve-st10010"``).  Used downstream to locate ADLS artifacts;
+        does not affect the Zarr store layout.
     chunks:
         Zarr chunk shape ``(inline, crossline, sample)``.
     sample_mode:
-        Load only the first ``sample_n_inlines`` inlines.
+        Load only the first ``sample_n_inlines`` inlines.  Use for local
+        smoke-ingest validation without the full ST10010 volume (~1 GB).
     sample_n_inlines:
         Inline count when ``sample_mode=True``.
     overwrite:
@@ -475,5 +497,5 @@ def segy_to_zarr(
     IngestMetadata
     """
     with SEGYLoader(source, sample_mode=sample_mode, sample_n_inlines=sample_n_inlines) as ldr:
-        _, meta = ldr.to_zarr(dest, chunks=chunks, overwrite=overwrite)
+        _, meta = ldr.to_zarr(dest, chunks=chunks, overwrite=overwrite, survey_id=survey_id)
     return meta

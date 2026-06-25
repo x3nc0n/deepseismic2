@@ -332,3 +332,39 @@ async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None 
 
 ---
 
+
+
+---
+
+
+### Lambert Decision — Agent Tool API Wiring (Updated)
+
+**Date:** 2026-06-09 (origin); Phase 1 integration verified  
+**Author:** Lambert (AI Integration Specialist)  
+**Status:** Live + verifying with real fault viewer
+
+#### Context
+
+FastAPI backend (13 endpoints) now live. Agent tool modules previously called stub paths. All tool modules unified under `_api_client.py` with consistent HTTP/retry logic.
+
+#### Key Decisions
+
+1. **Shared `_api_client.py` module**: Single HTTP client for all tools; centralises timeout/retry policy; `DEEPSEISMIC_API_URL` resolution consistent across all tools.
+2. **`httpx` promoted to core dependency**: `_api_client.py` is core agent package; moved from `[ui]` optional to main `dependencies`.
+3. **Endpoint mapping — seismic tools**:
+   - `query_survey_metadata` → `GET /api/surveys`
+   - `get_inline_section` → `GET /api/surveys/{id}/inline/{n}`
+   - `run_fault_detection` → `POST /api/interpretation/fault-detection`
+   - `get_interpretation_status` → `GET /api/interpretation/{run_id}/status`
+4. **Endpoint mapping — geological tools**: Per-well GET calls + client-side composition for correlation.
+5. **Endpoint mapping — reporting tools**: Compose from `/api/interpretation/{run_id}/status` + `.../results`.
+6. **Mock fallback unchanged**: `MOCK_LLM=true` → canned data; `false/unset` → real API with graceful degrade on `APIError`.
+
+#### Files Changed
+
+- `src/deepseismic/agent/tools/_api_client.py` — new
+- `src/deepseismic/agent/tools/seismic_tools.py` — live paths
+- `src/deepseismic/agent/tools/geological_tools.py` — live paths
+- `src/deepseismic/agent/tools/reporting_tools.py` — live paths
+- `pyproject.toml` — httpx to core deps
+

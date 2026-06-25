@@ -156,5 +156,56 @@ what is demo-grade, and what is an honest limitation.
 
 **10 items explicitly deferred:** TensorBoard, augmentation, confusion matrix, fault throw metrics, Fresnel assessment, 2D inference, real-mode API test, multi-model, amplitude-preserving default, wiggle traces.
 
-Full plan: `.squad/decisions/inbox/ripley-sprint2-plan.md`
+## Learnings — 2026-06-25T09:34:00-05:00: Sprint 3 Real-Data Readiness Docs
+
+### Sprint 3 readiness framing
+
+Sprint 3 made the full pipeline **app-ready** for real Volve data without executing
+on real data (execution is deploy-gated). The key framing distinction for docs:
+
+- **App-ready** = code path exists, locally validated against a format proxy (synthetic
+  SEG-Y, synthetic fault-stick files). No real data involved.
+- **Deploy-gated** = execution on real data requires infra #11 (SEG-Y staged to ADLS)
+  + Marketplace install + in-VNet compute. These are infrastructure/data-access
+  dependencies, not code gaps.
+
+Never say "validated on Volve data" for Sprint 3 work. The correct phrasing is
+"validated locally as a format proxy" or "synthetic-proxy validated."
+
+### Where the runbook lives
+
+`docs/real-data-runbook.md` — ordered steps: infra check → ingest → labels → train →
+eval → API → agent. Each step notes whether it must run in-VNet and which env vars /
+flags select real vs. mock mode.
+
+### Blocker dependencies
+
+| Blocker | Owner | Tracking |
+|---------|-------|---------|
+| ST10010_PSDM_TIME.segy into ADLS `raw` container | Spava-Corp/deepseismic2-infra | infra issue #11 |
+| Volve Databricks Marketplace install (identity-bound) | User (x3nc0n) | Manual |
+| Private endpoint — ADLS `publicNetworkAccess: Disabled` | Spava-Corp/deepseismic2-infra | infra issue #11 |
+
+### Key Sprint 3 doc changes
+
+- README.md: Status updated to Sprint 3; real-vs-demo table extended with all Sprint 3
+  changes; new "Real-data readiness" section with explicit blockers table; Sprint 3
+  smoke-test commands and in-VNet execution commands added.
+- docs/real-data-runbook.md: NEW file — the ordered deploy path.
+- docs/task-framing.md: Sprint 3 label densification note added; summary table updated
+  with synthetic proxy numbers.
+
+
+## Sprint 3 — De-Mock + Real-Data Readiness (2026-06-25)
+
+Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with production data pipelines. All integration tests passing (292/296).
+
+**Completed:**
+- De-mock: fail-loud 503 handling, AZURE_PROJECT_ENDPOINT validation
+- Real data: ST10010 geometry, survey_id integration
+- Dense labels: densify + interpolation (0.30% synthetic)
+- Integration tests: 69 new (292 total)
+- Docs: README, real-data-runbook, task-framing
+
+**Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
 

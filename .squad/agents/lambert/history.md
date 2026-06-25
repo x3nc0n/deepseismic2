@@ -10,6 +10,17 @@
 
 ## Learnings
 
+- **2026-06-25 (Sprint 3 — issue #9 — de-mock the Foundry agent):**
+  - **What changed:** Hardened mock→live default across `agent.py` and all three tool modules.
+  - **Key file paths:** `src/deepseismic/agent/agent.py`, `src/deepseismic/agent/tools/{seismic,geological,reporting}_tools.py`
+  - **Tools — call-time mock check:** Each tool module had `MOCK_MODE: bool = os.environ.get("MOCK_LLM", ...)` captured at **import time**. Added `_is_mock() -> bool` helper (checked at call time) and replaced every `if MOCK_MODE:` guard in tool functions with `if _is_mock():`. Module-level `MOCK_MODE` kept for backward-compat imports.
+  - **FoundryAgent — clear missing-credential error:** `os.environ["AZURE_PROJECT_ENDPOINT"]` raised a bare `KeyError` when missing. Changed to `os.environ.get(...)` + explicit `RuntimeError` naming the env var and offering the `MOCK_LLM=true` escape hatch.
+  - **DeepSeismicAgent — fail-loud, no silent fallback:** When not in mock mode and `AZURE_PROJECT_ENDPOINT` is missing, `__init__` raises `RuntimeError` immediately. Live mode never silently degrades to mock.
+  - **Mode visibility:** Mock path logs `"starting in MOCK mode (MOCK_LLM=true) — no Azure calls will be made"`. Live path logs endpoint URL and model name.
+  - **`get_state_summary`:** Changed `MOCK_MODE` (module-level import-time) to `_is_mock_mode()` (call-time).
+  - **Design decision:** Mock = explicit opt-in only. Misconfigured live = loud `RuntimeError`. No silent fallbacks anywhere.
+  - **Tests:** 210 passed, 2 skipped, 1 pre-existing failure (`test_04_api_health` — storage credentials absent locally, unrelated to agent). Ruff clean.
+
 - **2026-06-10:** Foundry-first decision locked. SharePoint removed. Azure AI Search for grounding.
 
 - **2026-06-09 (overnight sprint):** Wired agent tool modules to real FastAPI endpoints. Key decisions:
@@ -45,3 +56,17 @@ Phase 1 (Real Fault Viewer) complete. Phase 2 planning note:
 - **Data source:** Real Zarr amplitude from data/volve/staged/synthetic.zarr, real UNet fault probability from data/volve/staged/fault_prob.zarr (baked once by Dallas).
 - **Coordinate mapping:** Fault stick overlay now uses correct mapping (z_ms column = sample index × 4.0). All coordinate transforms verified against UTM reference data.
 - **Agent-tool feasibility:** Phase 2 detect_faults tool will call POST /api/interpretation/fault-detection with survey_id + optional checkpoint_blob parameter, return probability volume → agent streams inline slices to UI on user request.
+
+## Sprint 3 — De-Mock + Real-Data Readiness (2026-06-25)
+
+Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with production data pipelines. All integration tests passing (292/296).
+
+**Completed:**
+- De-mock: fail-loud 503 handling, AZURE_PROJECT_ENDPOINT validation
+- Real data: ST10010 geometry, survey_id integration
+- Dense labels: densify + interpolation (0.30% synthetic)
+- Integration tests: 69 new (292 total)
+- Docs: README, real-data-runbook, task-framing
+
+**Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
+

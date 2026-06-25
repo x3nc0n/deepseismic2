@@ -58,3 +58,70 @@ Phase 1 (Real Fault Viewer) complete. Infra deployment follow-up required:
 - **Deployment scope:** Copy Phase 1 code changes (src/, scripts/) to infra repo; verify bake script runs successfully in deployment environment; stage checkpoint (checkpoints/latest.pt) and baked Zarr output to blob storage before demo launch.
 - **No infrastructure changes:** Compute size, storage tier, Container Apps config remain unchanged. This is a data/code update, not an infra scaling event.
 - **Timeline:** Deploy after Phase 1 feature PR merges and tests pass.
+
+## Learnings — 2026-06-25T09:34:00-05:00 — Sprint 3 issue #9: De-mock the API critical path
+
+### What changed
+
+**`src/deepseismic/api/dependencies.py`**
+- `_build_storage_client()`: removed silent `except Exception: return None`. In real mode, if `StorageClient()` raises (e.g. no env credentials), the exception now propagates with a clear log message. `lru_cache` does not cache exceptions so the next call retries (construction is cheap — no network calls made at build time).
+- `get_storage_client()` FastAPI dependency: catches the raised exception and surfaces it as HTTP 503. Routes in real mode will never receive `None` storage — they either get a client or get a 503 before their handler is called.
+- Added `logging` import; added `HTTPException` import.
+
+**`src/deepseismic/api/main.py`**
+- `lifespan()`: wrapped `_build_storage_client()` call in try/except so startup failure logs clearly but does not crash the process.
+- `health()`: fully rewritten. `status` is always `"ok"` (liveness — process alive). `storage` field reports real readiness: `"mock"` | `"ok"` | `"unreachable"` | `"error"`. Does a lightweight `list_blobs("catalog", max_results=1)` ping in real mode to confirm reachability. `storage_error` field added when something is wrong.
+
+**`src/deepseismic/api/routes/interpretation.py`**
+- All four route mock guards: `if is_mock_mode() or storage is None:` → `if is_mock_mode():`. In real mode, `storage is None` cannot happen (dependency raises 503 instead).
+
+**`src/deepseismic/api/routes/surveys.py`**
+- Same fix on all five mock guards. Additionally: the `except Exception: return _mock_survey_list()` silent fallback in `list_surveys` is now `raise HTTPException(503, ...)` — real mode storage errors are no longer hidden.
+
+**`src/deepseismic/api/routes/wells.py`**
+- Same fix on three mock guards. `except Exception: return _mock_well_list()` is now `raise HTTPException(503, ...)`.
+
+**`src/deepseismic/api/routes/browse.py`**
+- `browse_container`: `if is_mock_mode() or storage is None:` → `if is_mock_mode():`.
+
+### Mock→real default decision
+
+Real mode is now robust-default: a properly configured deployment (Azurite or cloud) takes the real code path. Mock data is only served when `DEEPSEISMIC_MOCK_MODE=true` is explicitly set. Missing/broken storage config causes 503, not silent canned data.
+
+### Gotchas
+
+- `StorageClient.__init__` parses env vars only — no network calls. Construction rarely fails; it only raises if *both* `STORAGE_CONNECTION_STRING` and `AZURE_STORAGE_ACCOUNT` are absent. Actual storage reachability errors surface at the first blob operation.
+- `lru_cache` does NOT cache exceptions in Python, so `_build_storage_client()` retries on every request if configuration is broken. Acceptable since construction is O(1) and encourages fast recovery once env vars are fixed.
+- The e2e smoke test `test_04_api_health` expects `status == "ok"` — kept by keeping `status` as a pure liveness field (always "ok" when process is alive).
+- Container name contract respected: `raw`, `staged`, `results`, `catalog`, `features` — unchanged.
+
+## Learnings — 2026-06-25 — Sprint 3 BUG-1: survey_id missing from catalog sidecar
+
+### What changed
+
+**`src/deepseismic/api/routes/surveys.py` — `_run_ingest()` line 181**
+- `ldr.to_zarr(zarr_path, overwrite=True)` was missing the `survey_id` keyword argument.
+- Fixed to: `ldr.to_zarr(zarr_path, overwrite=True, survey_id=req.survey_id)`.
+- Without this, `meta.survey_id` was always `None` in the uploaded `catalog/surveys/{survey_id}/metadata.json` sidecar.
+
+**`src/tests/test_api/test_api_real_mode.py` — `test_run_ingest_catalog_metadata_is_valid_json`**
+- Updated test now asserts `meta["survey_id"] == survey_id` instead of documenting the bug with a comment.
+- All pre-existing assertions (geometry, amplitude_stats, ingested_at) kept intact.
+
+### Key fact
+`SEGYLoader.to_zarr()` accepts a `survey_id: str | None = None` keyword parameter (added Sprint 3 Wave 1 by Dallas). Always pass `survey_id=req.survey_id` when calling it from `_run_ingest` so the sidecar is self-describing.
+
+
+## Sprint 3 — De-Mock + Real-Data Readiness (2026-06-25)
+
+Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with production data pipelines. All integration tests passing (292/296).
+
+**Completed:**
+- De-mock: fail-loud 503 handling, AZURE_PROJECT_ENDPOINT validation
+- Real data: ST10010 geometry, survey_id integration
+- Dense labels: densify + interpolation (0.30% synthetic)
+- Integration tests: 69 new (292 total)
+- Docs: README, real-data-runbook, task-framing
+
+**Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
+

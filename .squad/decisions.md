@@ -1058,38 +1058,6 @@ Result: Inverted-guard bug fixed; assertions now accurate when files are confirm
 | File | Change |
 |------|--------|
 | `src/tests/test_viewer/test_viewer.py` | Synthesized fault-stick fixture; added `@pytest.mark.skipif` to zarr readers |
-
-### Lambert Decision — Agent Tool API Wiring (Updated)
-
-**Date:** 2026-06-09 (origin); Phase 1 integration verified  
-**Author:** Lambert (AI Integration Specialist)  
-**Status:** Live + verifying with real fault viewer
-
-#### Context
-
-FastAPI backend (13 endpoints) now live. Agent tool modules previously called stub paths. All tool modules unified under `_api_client.py` with consistent HTTP/retry logic.
-
-#### Key Decisions
-
-1. **Shared `_api_client.py` module**: Single HTTP client for all tools; centralises timeout/retry policy; `DEEPSEISMIC_API_URL` resolution consistent across all tools.
-2. **`httpx` promoted to core dependency**: `_api_client.py` is core agent package; moved from `[ui]` optional to main `dependencies`.
-3. **Endpoint mapping — seismic tools**:
-   - `query_survey_metadata` → `GET /api/surveys`
-   - `get_inline_section` → `GET /api/surveys/{id}/inline/{n}`
-   - `run_fault_detection` → `POST /api/interpretation/fault-detection`
-   - `get_interpretation_status` → `GET /api/interpretation/{run_id}/status`
-4. **Endpoint mapping — geological tools**: Per-well GET calls + client-side composition for correlation.
-5. **Endpoint mapping — reporting tools**: Compose from `/api/interpretation/{run_id}/status` + `.../results`.
-6. **Mock fallback unchanged**: `MOCK_LLM=true` → canned data; `false/unset` → real API with graceful degrade on `APIError`.
-
-#### Files Changed
-
-- `src/deepseismic/agent/tools/_api_client.py` — new
-- `src/deepseismic/agent/tools/seismic_tools.py` — live paths
-- `src/deepseismic/agent/tools/geological_tools.py` — live paths
-- `src/deepseismic/agent/tools/reporting_tools.py` — live paths
-- `pyproject.toml` — httpx to core deps
-
 ## Merged Decisions
 
 ## Inbox: coordinator-ui-localdev-labels
@@ -1574,4 +1542,888 @@ Both backends: if fault_prob artifact is absent → `get_fault_prob_slice()` ret
 | `src/deepseismic/ui/streamlit_app.py` | Thin `@st.cache_data` wrappers; imports from `_data_readers` |
 | `src/deepseismic/storage/blob_client.py` | Added `ABSZarrV3Store`, updated `upload_zarr_store` + `open_zarr_store` |
 | `src/tests/test_viewer/test_viewer.py` | Updated array-name string guards to also check `_data_readers.py` |
+
+
+
+
+---
+
+# Decision Note: S3-#8 — Dense Fault Labels App-Readiness
+
+**Author:** Ash (Geophysicist SME)
+**Date:** 2026-06-25T09:34:00-05:00
+**Sprint item:** S3-#8 (expand fault labels beyond 18 stick points — app-readiness)
+**Status:** Complete (synthetic proxy validated) | Blocked on real data (infra #11 / Marketplace)
+
+---
+
+## Problem Statement
+
+Sprint 2 produced 18 raw stick points -> 7,967 fault voxels -> 0.0797 % positive fraction.
+This is pathologically sparse (neg/pos ratio ~1,255). Training requires heavy
+WeightedRandomSampler (50x) + combined BCE/Dice loss.
+
+Real dense Volve fault interpretations live in `Volve_Geophysical_Interpretations.zip` in
+the gated Databricks Marketplace share -- blocked on infra #11 + user Marketplace install.
+This sprint makes the code READY for that data to drop in cleanly.
+
+---
+
+## What Was Built
+
+### 1. `densify_stick_to_il_resolution` (new, `label_generator.py`)
+
+Module-level function that inserts 1-IL-resolution interpolated picks between
+sparse fault picks in a polyline (0-based index space).
+
+**Geophysical justification:** Fault geometry is approximately planar between
+adjacent interpreted sticks. Linearly interpolating XL and Z at each intermediate
+IL is valid when the inline gap is small. Gaps > `max_il_gap` (default 5) are NOT
+bridged -- they may represent fault segmentation or interpretation discontinuities.
+
+**Resolution guardrail:** lambda/4 at 36.6 Hz, v=2000 m/s -> ~13.7 m -> ~3.4 samples
+at 4 ms/sample. Rasterising at 1-IL steps ensures the label band is never thinner
+than the minimum resolvable feature. Dilation=3 adds 12 ms TWT positional uncertainty
+(~24 m at 1 km/s one-way), within the picking uncertainty of sparse fault sticks.
+
+**Critical uncertainty finding:** For LINEAR fault geometry (straight polylines), the
+existing arc-length parameterisation in `_rasterise_stick` already covers all
+intermediate ILs regardless of densification. The formula n_q = max(int(arc*2), len(pts))
+guarantees >= 2 samples per unit of arc, which always covers every integer IL for
+picks <= max_gap=5 ILs apart. Therefore:
+- For the current .dat format (one connected polyline per fault), densification does NOT
+  increase voxel count for linear geometry.
+- The function adds VALUE for: (a) curved fault geometry, (b) explicit IL-resolution
+  documentation, (c) real Petrel multi-stick format (separate sticks per IL).
+- For real Volve data in Petrel format, densification should be applied at the
+  FaultStick group level (group all sticks for one fault, merge, then densify).
+
+### 2. `add_fault_sticks_in_index_space` updated (`label_generator.py`)
+
+Added keyword arguments:
+- `interpolate_between: bool = False` -- apply densify_stick_to_il_resolution
+- `max_interp_gap_il: int = 5` -- guardrail: max IL gap to bridge
+
+Backward-compatible (keyword-only args with defaults).
+
+### 3. `generate_fault_label.py` updated
+
+New CLI arguments:
+- `--interpolate-between` -- enable between-stick densification
+- `--max-interp-gap N` -- guardrail (default 5)
+
+Updated QC report:
+- Before/after positive-fraction comparison when --interpolate-between is used
+- [SYNTHETIC PROXY] banner when fault_sticks_synth/ directory is used
+- Resolution guardrail displayed (L/4 ~ 13.7 m, dilation band = N voxels x 4ms)
+- Pass/caution/warn thresholds: >= 0.5% = PASS, < 0.5% = CAUTION, < 0.01% = WARN
+
+### 4. Synthetic proxy directory (`data/volve/interpretations/fault_sticks_synth/`)
+
+6 files, 76 raw picks (vs 18 real sticks). Clearly labeled SYNTHETIC PROXY in every
+file header comment. NOT real Volve ground truth.
+
+Files:
+| File | Fault type | IL range | XL range | Z range | Picks |
+|------|-----------|----------|----------|---------|-------|
+| fault_antithetic.dat | Copy of real | 72-96 | 47-54 | 300-307 | 7 |
+| fault_main_normal.dat | Copy of real | 45-95 | 84-124 | 202-227 | 11 |
+| fault_synth_splay_nw.dat | NW splay | 10-52 | 10-52 | 180-216 | 15 |
+| fault_synth_conjugate_se.dat | SE conjugate | 50-95 | 100-145 | 235-280 | 16 |
+| fault_synth_deep_main_ext.dat | Deep main ext | 45-95 | 84-124 | 265-295 | 11 |
+| fault_synth_minor_relay.dat | Relay ramp | 40-70 | 110-140 | 200-230 | 16 |
+
+---
+
+## Before / After Positive-Fraction Numbers
+
+| Scenario | Files | Raw picks | Fault voxels | Positive fraction |
+|----------|-------|-----------|--------------|-------------------|
+| Sprint 2 baseline (real sticks) | 2 | 18 | 7,967 | **0.0797 %** |
+| Synthetic proxy (6 files) | 6 | 76 | 29,787 | **0.2979 %** |
+| Synthetic + --interpolate-between | 6 | 76 -> 247 | 29,773 | **0.2977 %** |
+
+Key finding: the 3.7x improvement (0.0797% -> 0.2979%) comes entirely from ADDING MORE
+FILES (more fault interpretations), not from the between-stick densification. For linear
+fault geometry, densification and the existing arc-length rasterizer produce equivalent
+results (as proved mathematically -- see label_generator.py docstring).
+
+**What fraction is needed?**
+- < 0.01 % = pathological (Sprint 2 baseline with real sticks only)
+- 0.08 % = observed Sprint 2 result with real sticks only
+- 0.30 % = synthetic proxy (6 files) -- better but still sparse
+- >= 0.5 % = target for "approaching meaningful" -- needs ~10+ fault files
+- >= 2.0 % = good coverage -- likely with full real Volve interpretation set
+- >= 5.0 % = ideal -- may require broader area or additional synthetic augmentation
+
+**Training impact:** At 0.30 % the neg/pos ratio is ~334:1. Still requires heavy
+weighting (pos_weight ~100-200) and fault-aware sampling. The real Volve dense
+interpretation set should push this to >= 1 %.
+
+---
+
+## Coordinate Mapping Confirmation
+
+No changes to coordinate mapping from Sprint 2:
+- col[0] = inline_idx (0-based), col[1] = crossline_idx (0-based), col[2] = z_col (sample index)
+- abs_inline = 1001 + il_idx, abs_crossline = 1900 + xl_idx, twt_ms = z_col * 4.0
+- Synthetic proxy picks confirmed in-bounds: all 76/76 inside (100x200x500) volume
+
+---
+
+## Overlap Coordination -- Dallas (SEG-Y path generalisation)
+
+Dallas is generalising the SEG-Y *path* argument in the label_generator / ingest area
+this sprint. My changes are confined to:
+- `densify_stick_to_il_resolution` (new function, module level)
+- `add_fault_sticks_in_index_space` (new keyword args only, no signature breaking change)
+
+No changes to `segy_loader.py`, `parse_petrel_fault_sticks`, or any SEG-Y loading path.
+Recommend Dallas reviews this note to confirm no overlap.
+
+---
+
+## When Real Volve Data Arrives
+
+When `Volve_Geophysical_Interpretations.zip` is accessible:
+
+1. If Petrel format: use `parse_petrel_fault_sticks` (already exists, handles FAULT headers)
+2. If OpendTect format: use `parse_opendtect_fault_sticks` (already exists)
+3. Group sticks by fault name
+4. Apply `densify_stick_to_il_resolution` to each fault's merged point list
+5. Call `add_fault_sticks_in_index_space` with `interpolate_between=True`
+6. Use `--fault-stick-dir` to point to real interpretation directory
+7. Output to `fault_label.zarr` (overwriting the current 2-stick version)
+
+**For Petrel multi-stick format (each stick = vertical line at one IL):**
+The current densification applies WITHIN each stick (per-polyline). For the Petrel case,
+sticks from the same fault should be MERGED into one polyline before densification.
+This is a deferred enhancement (no real data yet to validate against).
+
+---
+
+## Tests Added
+
+| Test class | Tests | What they cover |
+|-----------|-------|-----------------|
+| TestDensifyStickToIlResolution | 8 | basic gap bridging, XL/Z linear interp, gap guardrail, sort, mixed gaps |
+| TestInterpolateBetweenSticks | 3 | API contract, >=baseline assertion, gap guardrail |
+
+Full non-integration suite: 223 passed, 2 skipped (unchanged from Sprint 2). Ruff clean.
+
+---
+
+## Outstanding / Follow-on
+
+- S3-#11 (infra): When Marketplace access is restored, swap in real Volve sticks and
+  re-run generate_fault_label.py. Expected positive fraction ~1-3%.
+- Delete `fault_label_synth.zarr` from staged/ before production training run (it is a
+  proxy validation artifact, not training ground truth).
+- For Petrel multi-stick format: add fault-name-level grouping to `add_fault_sticks_in_index_space`
+  so sticks from the same fault are merged before densification.
+
+
+---
+
+# Decision: S3-06 — ADLS-Backed Training + Evaluation
+
+**Author:** Dallas (Data/ML Engineer)
+**Date:** 2026-06-25T09:34:00-05:00
+**Sprint item:** S3-06
+**Status:** Implemented ✅
+
+---
+
+## Problem
+
+Training (`train.py`) and evaluation (`evaluate.py`) read Zarr stores only from
+the local filesystem.  Once real ST10010 data lands in ADLS (`staged/surveys/
+volve-st10010/amplitude.zarr`), in-VNet jobs must read directly from Azure Blob
+Storage without copying gigabytes to local disk.
+
+The `ABSZarrV3Store` (blob_client.py) already existed from Phase 2; it just
+wasn't wired into the training/eval pipeline.
+
+---
+
+## Design decisions
+
+### Backend selection: `--storage-backend local|azure`
+
+Selected a **CLI flag + config field** (`storage_backend`) over an env var
+because:
+- Env var approach is already used for viewer (`DEEPSEISMIC_DATA_BACKEND`).
+- CLI flag is more explicit for job submissions (Azure ML command args are visible
+  in run history; env vars are not).
+- Default is `local` — existing scripts work unchanged.
+
+### ADLS path convention
+
+Following infra issue #11 contract:
+```
+staged/surveys/{survey_id}/amplitude.zarr
+staged/surveys/{survey_id}/fault_label.zarr
+```
+Defaults baked into CLI args:
+- `--az-seismic-prefix surveys/volve-st10010/amplitude.zarr`
+- `--az-label-prefix surveys/volve-st10010/fault_label.zarr`
+
+### Shared `open_zarr_root()` helper
+
+Created `src/deepseismic/storage/zarr_helpers.py` with `open_zarr_root()`:
+```python
+root = open_zarr_root(local_path, backend="local")             # dev
+root = open_zarr_root(None, backend="azure",                   # cloud
+    az_container="staged", az_prefix="surveys/volve-st10010/amplitude.zarr")
+```
+Both train.py and evaluate.py import from this module — single place to maintain
+the backend-dispatch logic.
+
+### `PatchDataset` receives `zarr.Array` objects (not paths)
+
+When ADLS backend is selected, `_build_zarr_loaders` opens the zarr roots,
+extracts `seismic_arr = root["amplitude"]` and `label_arr = root["fault_mask"]`,
+and passes them directly to `PatchDataset`.  `PatchDataset._open_zarr_array()`
+already handles `isinstance(src, zarr.Array)` — no changes to patches.py needed.
+
+### Sprint 2 imbalance handling preserved unchanged
+
+The `WeightedRandomSampler` (50× fault-patch weight), combined BCE+Dice loss,
+and `pos_weight=200` are all preserved exactly.  The only change is WHERE the
+zarr data is read from; the patch scanning loop and sampler logic are identical.
+
+### Sprint 2 coordinate mapping preserved
+
+No changes to `SurveyTransform`, `FaultMaskGenerator`, or the fault-stick
+coordinate mapping.  The ADLS-backend change is purely at the data-loading layer.
+
+---
+
+## Changes made
+
+### `src/deepseismic/storage/zarr_helpers.py` (NEW)
+- `open_zarr_root(local_path, *, backend, az_container, az_prefix) → zarr.Group`
+- `resolve_zarr_array(...)` — convenience wrapper that also extracts named array.
+- Raises `ValueError` if `backend="azure"` but container/prefix missing.
+- Raises `FileNotFoundError` if `backend="local"` and path doesn't exist.
+
+### `src/deepseismic/training/train.py`
+- Added to `TrainConfig`:
+  ```python
+  storage_backend: str = "local"
+  az_seismic_container: str = "staged"
+  az_seismic_prefix: str = "surveys/volve-st10010/amplitude.zarr"
+  az_label_container: str = "staged"
+  az_label_prefix: str = "surveys/volve-st10010/fault_label.zarr"
+  ```
+- `_build_zarr_loaders` now uses `open_zarr_root()` for both arrays.
+- Added CLI args: `--storage-backend`, `--az-seismic-container`,
+  `--az-seismic-prefix`, `--az-label-container`, `--az-label-prefix`.
+
+### `scripts/evaluate.py`
+- `run_evaluation()` accepts `storage_backend`, `az_seismic_container`,
+  `az_seismic_prefix`, `az_label_container`, `az_label_prefix` params.
+- Opens zarr stores via `open_zarr_root()` (local or ADLS).
+- Added matching CLI args.
+- Removed unused `import zarr` at module top.
+
+---
+
+## In-VNet training invocation (real ST10010)
+
+```bash
+# Train on real ADLS-staged data (in-VNet job only):
+python -m deepseismic.training.train \
+    --data-mode zarr \
+    --storage-backend azure \
+    --az-seismic-prefix surveys/volve-st10010/amplitude.zarr \
+    --az-label-prefix surveys/volve-st10010/fault_label.zarr \
+    --epochs 50 \
+    --device cuda \
+    --seed 42
+
+# Evaluate from ADLS checkpoint:
+python scripts/evaluate.py \
+    --checkpoint /mnt/features/checkpoints/best.pt \
+    --storage-backend azure \
+    --az-seismic-prefix surveys/volve-st10010/amplitude.zarr \
+    --az-label-prefix surveys/volve-st10010/fault_label.zarr
+```
+
+---
+
+## Real-data execution boundary
+
+**Real data MUST run in-VNet** (Azure ML / Container App job) because:
+- ADLS uses private endpoints — no public internet access.
+- Infra issue #11 must copy ST10010_PSDM_TIME.segy into `raw` container first.
+- Trained checkpoints land in `features` container.
+- Eval results land in `results` container.
+
+Local dev always uses `--storage-backend local` (default).
+
+---
+
+## Reproducibility preserved
+
+- `seed=42` default unchanged.
+- `run_config.json` persisted — now includes `storage_backend` and `az_*` fields.
+- Sprint 2 imbalance strategy (WeightedRandomSampler + BCE+Dice + pos_weight=200)
+  unchanged.
+
+
+---
+
+# Decision: S3-04 — ST10010 Real-Geometry Ingest Readiness
+
+**Author:** Dallas (Data/ML Engineer)
+**Date:** 2026-06-25T09:34:00-05:00
+**Sprint item:** S3-04
+**Status:** Implemented ✅
+**Coordination note:** See also `dallas-s3-adls-train-eval.md` for the companion ADLS-backend decision.
+
+---
+
+## Problem
+
+Before real Volve ST10010 SEG-Y lands in ADLS (infra issue #11 + Marketplace
+install), the ingest code needed to be audited and made app-ready.  Two specific
+gaps were flagged:
+
+1. Any hard-coded geometry assumptions that would break on ST10010
+   (inlines 9985–10369, non-zero inline/crossline base, real dt/datum).
+2. Hard-coded `data/raw/ST10010.segy` path in `label_generator.py`.
+3. No standalone CLI for `segy_to_zarr` (format validation needed locally).
+
+---
+
+## Geometry audit findings
+
+`src/deepseismic/ingest/segy_loader.py` — **PASS, no geometry assumptions broken.**
+
+| Check | Finding |
+|---|---|
+| `inline_min/max` from `f.ilines` | File-driven — handles 9985–10369 correctly |
+| `inline_step` from `inlines[1]-inlines[0]` | File-driven — step=1 for ST10010 |
+| `sample_rate_ms` from `segyio.tools.dt(f)/1000` | File-driven — will read real dt |
+| `datum_ms` from trace header byte 109 | File-driven — reads `DelayRecordingTime` |
+| `n_inlines`, `n_crosslines`, `n_samples` | All from `f.ilines`, `f.xlines`, `f.samples` |
+| `sample_mode` subsetting | `n_il = min(n_il, sample_n_inlines)` — correct |
+| Coordinate slicing in `to_zarr` | `geom.inlines[:amplitude.shape[0]]` — correct |
+
+**No geometry hard-coding found.** The SEGYLoader is fully file-driven and will
+handle ST10010's non-zero inline base (9985) and real dt/datum without changes.
+
+---
+
+## Changes made
+
+### `src/deepseismic/ingest/segy_loader.py`
+- Added `survey_id: str | None = None` parameter to `to_zarr()` and `segy_to_zarr()`.
+- Embedded `survey_id` in `IngestMetadata` sidecar JSON.
+- Updated module docstring usage example to show ST10010-ready call pattern
+  (path as argument, not hard-coded).
+
+### `src/deepseismic/ingest/label_generator.py`
+- Updated module docstring usage example: removed `"data/raw/ST10010.segy"`,
+  replaced with `segy_path = "path/to/your/survey.segy"` placeholder.
+  The running code was never hard-coded; this was docstring only.
+
+### `scripts/generate_fault_label.py`
+- Added `--fault-stick-dir`, `--amplitude-json`, `--label-output` CLI args
+  (hardcoded values become defaults).
+- Removed module-level `BASE_IL = 1001` / `BASE_XL = 1900` constants; replaced
+  with geometry-derived values (`geom["inline_min"]`, `geom["crossline_min"]`)
+  so the script works for any survey without code changes.
+
+### `scripts/ingest_segy.py` (NEW)
+- CLI wrapper for `segy_to_zarr()`.  Exposes `--source`, `--dest`, `--survey-id`,
+  `--sample-mode`, `--sample-n-inlines`, `--overwrite`, `--chunks`.
+- ADLS path convention documented: `staged/surveys/{survey_id}/amplitude.zarr`.
+- Writes a JSON summary to stdout (log-capture friendly for Azure ML jobs).
+
+---
+
+## Local synthetic-proxy validation (FORMAT PROXY ONLY)
+
+**⚠️ SYNTHETIC-PROXY — these numbers are NOT from real Volve ST10010 data.**
+Real ingest must run in-VNet once infra issue #11 lands the SEG-Y.
+
+Command run:
+```
+python scripts/ingest_segy.py \
+    --source data/volve/synthetic_sample.segy \
+    --dest data/volve/staged/smoke_ingest.zarr \
+    --survey-id synthetic-proxy \
+    --sample-mode --sample-n-inlines 20 \
+    --overwrite
+```
+
+Result:
+| Field | Value |
+|---|---|
+| Inlines loaded | 20 / 100 (sample_mode) |
+| Inline range | 1001–1020 (file-driven from synthetic) |
+| Crosslines | 1900–2099 (200) |
+| Samples | 500  dt=4.0 ms  datum=0.0 ms |
+| Amplitude p01/p99 | −0.1206 / 0.1042 |
+| Zarr shape | (20, 200, 500) float32 |
+| Chunks | (64, 64, 128) |
+| Sidecar written | smoke_ingest.json ✓ |
+
+**Verdict: FORMAT PATH VALIDATED.** The `segy_to_zarr` → zarr store → sidecar JSON
+pipeline works correctly end-to-end.  The inline/crossline/time coordinate arrays
+are written alongside amplitude; geometry is fully file-driven.
+
+---
+
+## In-VNet smoke ingest command (real ST10010)
+
+```bash
+# Cheap smoke-ingest (first 50 inlines, ~seconds):
+python scripts/ingest_segy.py \
+    --source /mnt/raw/ST10010_PSDM_TIME.segy \
+    --dest /mnt/staged/surveys/volve-st10010/amplitude.zarr \
+    --survey-id volve-st10010 \
+    --sample-mode --sample-n-inlines 50 \
+    --overwrite
+
+# Full ingest (in-VNet only — private endpoint):
+python scripts/ingest_segy.py \
+    --source /mnt/raw/ST10010_PSDM_TIME.segy \
+    --dest /mnt/staged/surveys/volve-st10010/amplitude.zarr \
+    --survey-id volve-st10010 \
+    --overwrite
+```
+
+---
+
+## Coordination note for Ash
+
+Ash is densifying labels in `label_generator.py` (adding `interpolate_between`
+parameter to `add_fault_sticks_in_index_space`).  My changes to that file were
+**docstring-only** (module usage example).  No functional overlap, no conflict.
+
+The `generate_fault_label.py` changes (new CLI args) do not conflict with Ash's
+`--interpolate-between`/`--max-interp-gap` additions — I added new args AFTER
+the existing ones.  The `BASE_IL`/`BASE_XL` removal is geometry-neutral (Ash's
+interpolation code doesn't use those constants).
+
+
+---
+
+# Decision: Sprint 3 Real-Mode Integration Tests (Hudson)
+
+**Date:** 2026-06-25  
+**Author:** Hudson (Tester/QA)  
+**Status:** Complete  
+**Refs:** Issue #9, Sprint 3 Wave 1 de-mock PRs
+
+---
+
+## What was built
+
+Three new test files, 69 new tests (+9 deselected integration):
+
+| File | Tests | Marker |
+|---|---|---|
+| `src/tests/test_api/test_api_real_mode.py` | 33 passing, 1 integration | `@pytest.mark.integration` for Azurite |
+| `src/tests/test_ingest/test_zarr_helpers.py` | 21 passing | None (all CI-safe) |
+| `src/tests/test_agent_realmode.py` | 18 passing | None (all CI-safe) |
+
+**Suite results:**
+- `pytest -m "not integration" -q` → **292 passed**, 2 skipped, 9 deselected ✓ (was 223)
+- `pytest -m "integration" -q` → 4 passed, 5 skipped (all skip cleanly without Azurite) ✓
+- `ruff check src/` → All checks passed ✓
+
+---
+
+## Real-path behaviors locked in
+
+### 1. Health endpoint storage state contract
+- `storage: "ok"` — storage client built AND list_blobs succeeds
+- `storage: "unreachable"` — client built but list_blobs raises
+- `storage: "error"` — client cannot be built (misconfigured)
+- `storage: "mock"` — only when `DEEPSEISMIC_MOCK_MODE=true`
+- `status: "ok"` always (process alive regardless of storage state)
+
+### 2. 503 fail-loud guard (KEY regression guard)
+`TestRealModeFailLoud503` locks in the Wave 1 de-mock contract:  
+- In real mode (DEEPSEISMIC_MOCK_MODE unset) with broken storage, **GET /api/surveys and GET /api/wells return 503** — never silently return canned Volve data.  
+- The mock Volve survey id `"volve-st10010"` must NOT appear in real-mode responses.  
+- `DEEPSEISMIC_MOCK_MODE=true` still returns 200 with mock data (mock mode is intentional).
+
+### 3. Mock-vs-real selection
+- `is_mock_mode()` returns False by default; True only for `"true"`, `"1"`, `"yes"` (case-insensitive).
+- `_is_mock_mode()` in agent is call-time (not frozen at import) — env changes are reflected.
+
+### 4. Agent fail-loud
+- `DeepSeismicAgent()` raises `RuntimeError` mentioning `AZURE_PROJECT_ENDPOINT` and `MOCK_LLM` when endpoint is absent in live mode.
+- Empty string and whitespace-only values are treated as absent (`.strip()` guard confirmed).
+- `FoundryAgent()` raises identically.
+- `MOCK_LLM=true|1|yes` activates `MockAgent`; no Azure calls made.
+
+### 5. Ingest real-path (dict-backed storage, no Azurite)
+`TestRealPathIngestFlow` exercises `_run_ingest` with the synthetic SEG-Y:
+- Status set to `"complete"` on success.
+- Catalog JSON uploaded to `catalog/surveys/{survey_id}/metadata.json`.
+- `upload_zarr_store` called exactly once, targeting `staged` container with `amplitude.zarr` prefix.
+- Sidecar geometry has positive n_inlines, n_crosslines, n_samples.
+
+### 6. zarr_helpers dispatch
+- `open_zarr_root(local_path)` opens a valid zarr.Group.
+- `FileNotFoundError` for missing paths; `ValueError` for None or empty Azure params.
+- Azure branch dispatches through `StorageClient.open_zarr_store()` (verified with dict-backed mock).
+- `segy_to_zarr` produces float32 amplitude, coordinate arrays, no NaN/Inf, amplitude_stats.
+- `sample_mode=True, sample_n_inlines=2` limits output to exactly 2 inlines.
+
+---
+
+## Bugs found — flagged for owners
+
+### BUG-1: `_run_ingest` does not pass `survey_id` to `ldr.to_zarr()`
+**File:** `src/deepseismic/api/routes/surveys.py`, `_run_ingest()`, line ~181  
+**Owner:** Parker (API routes)  
+**Severity:** Low (functional gap, not a crash)  
+**Description:**  
+```python
+# Current (bug):
+_, meta = ldr.to_zarr(zarr_path, overwrite=True)
+# Should be:
+_, meta = ldr.to_zarr(zarr_path, overwrite=True, survey_id=req.survey_id)
+```
+`SEGYLoader.to_zarr()` accepts a `survey_id` parameter added in Wave 1 (Dallas). `_run_ingest` never passes it, so `meta.survey_id` is always `None` in the uploaded sidecar JSON. The survey listing route parses this sidecar and cannot recover the survey_id from it — downstream consumers that expect `survey_id` in the sidecar will see `None`.  
+
+**Test coverage:** `test_run_ingest_catalog_metadata_is_valid_json` documents this behavior with a comment; the missing `survey_id` in sidecar is noted but not asserted (test reflects actual behavior, not desired behavior).
+
+---
+
+## Patterns used
+
+**Patching `_build_storage_client`:**  
+`_build_storage_client` is decorated with `@lru_cache` and imported by name into `main.py`. Tests patch **both** `deepseismic.api.dependencies._build_storage_client` and `deepseismic.api.main._build_storage_client` using `monkeypatch.setattr()` to cover all call sites. TestClient is entered **after** patching so the lifespan runs with the patched version.
+
+**Azure mock pattern (zarr_helpers):**  
+`StorageClient` is imported inside `open_zarr_root()` via a local import (`from deepseismic.storage.blob_client import StorageClient`). Patching `deepseismic.storage.blob_client.StorageClient` (the source) correctly intercepts all instantiations.
+
+**`_DictStorageClient`:**  
+Thin in-memory storage that satisfies the StorageClient interface. Records `upload_zarr_store` calls for assertion. Used in all CI-safe API integration tests.
+
+
+---
+
+# Decision: Agent Mock→Live Default Hardening (Sprint 3, issue #9)
+
+**Author:** Lambert  
+**Date:** 2026-06-25T09:34:00-05:00  
+**Status:** Implemented  
+
+---
+
+## Context
+
+Sprint 3 goal: make the live Azure OpenAI / Foundry path the correct, robust default when credentials are configured. Before this change:
+
+- `MOCK_MODE` in all three tool modules was captured at **module import time**, meaning test isolation and post-import env-var changes could not flip the mode.
+- `FoundryAgent.__init__` used `os.environ["AZURE_PROJECT_ENDPOINT"]`, raising a bare `KeyError` with no actionable message when the env var was absent.
+- `DeepSeismicAgent.__init__` had no guard: if `FoundryAgent()` raised during live-mode instantiation, the caller saw an opaque exception rather than a clear configuration error.
+- `get_state_summary` returned the module-level `MOCK_MODE` bool (import-time) rather than the current runtime state.
+
+## Decisions Made
+
+### 1. Mock is explicit opt-in only
+
+`MOCK_LLM` must be explicitly set to `"true"`, `"1"`, or `"yes"` to enable mock mode. The absence of the env var means live mode. This is enforced via `_is_mock() -> bool` in each tool module and `_is_mock_mode() -> bool` in `agent.py` — both read `os.environ` at **call time**, not at import time.
+
+### 2. Misconfigured live = loud `RuntimeError`, never silent mock fallback
+
+If live mode is active and `AZURE_PROJECT_ENDPOINT` is not set, `DeepSeismicAgent.__init__` raises `RuntimeError` with:
+- The name of the missing env var
+- How to fix it (set the var OR set `MOCK_LLM=true`)
+- An explicit note that live mode will NOT silently fall back to mock
+
+This prevents broken deployments from masquerading as working by returning canned data.
+
+### 3. Mode visibility at startup
+
+- Mock: `"starting in MOCK mode (MOCK_LLM=true) — no Azure calls will be made"`
+- Live: `"starting in LIVE mode — endpoint: <url>  model: <model>"`
+
+### 4. Module-level `MOCK_MODE` kept for backward compatibility
+
+The exported `MOCK_MODE: bool` at module level is retained in all three tool files (some external importers may read it). The actual runtime gate is the `_is_mock()` call inside each function.
+
+## Files Changed
+
+- `src/deepseismic/agent/agent.py` — `FoundryAgent.__init__`, `DeepSeismicAgent.__init__`, `get_state_summary`
+- `src/deepseismic/agent/tools/seismic_tools.py` — `_is_mock()` added; 4 functions updated
+- `src/deepseismic/agent/tools/geological_tools.py` — `_is_mock()` added; 4 functions updated
+- `src/deepseismic/agent/tools/reporting_tools.py` — `_is_mock()` added; 3 functions updated
+
+## Test / Lint Status
+
+- `python -m pytest -m "not integration" -q`: 210 passed, 2 skipped, 1 pre-existing failure (storage health test, unrelated to agent)
+- `python -m ruff check src/deepseismic/agent/`: All checks passed
+
+## For the team
+
+Parker / Ripley: No API route or infra changes. The `AZURE_PROJECT_ENDPOINT` env var must be present in the deployed environment; the agent will refuse to start without it (intentional).
+
+Dallas: No ML or training changes.
+
+Hudson: Existing test mocks (patch `DeepSeismicAgent`) remain unaffected. Tests that need real tool-function mock mode should set `MOCK_LLM=true` in `os.environ` within the test — the check is now at call time so this works correctly even after module import.
+
+
+---
+
+# Decision Note: S3-09 — De-mock the API Critical Path
+
+**Author:** Parker (Backend/Infra)
+**Date:** 2026-06-25T09:34:00-05:00
+**Sprint item:** Sprint 3, issue #9
+**Status:** Implemented ✅
+
+---
+
+## Problem
+
+The FastAPI backend had a systemic silent-mock fallback: any exception during
+`StorageClient` construction in real mode returned `None`, and every route
+guard was `if is_mock_mode() or storage is None:` — meaning a misconfigured
+cloud deployment served fake canned data instead of failing with a clear error.
+
+---
+
+## Decision: Fail Loud in Real Mode, Mock is Explicit Opt-In
+
+### 1. `dependencies.py` — `_build_storage_client()` now propagates errors
+
+Before:
+```python
+except Exception:
+    return None  # silent degradation
+```
+
+After:
+```python
+except Exception as exc:
+    logger.error("StorageClient initialisation failed in real mode: %s — ...", exc)
+    raise  # fail loud; caller surfaces as HTTP 503
+```
+
+`get_storage_client()` (the FastAPI dependency) catches the raise and returns
+`HTTPException(503)` so routes never receive `None` in real mode.
+
+### 2. Route guards cleaned up
+
+All `if is_mock_mode() or storage is None:` → `if is_mock_mode():`.
+
+In `surveys.py` and `wells.py`, the `except Exception: return _mock_*()` silent
+fallbacks were replaced with `raise HTTPException(503, ...)` — storage errors
+are no longer hidden behind canned data.
+
+### 3. Health endpoint enhanced
+
+`GET /health` and `GET /api/health` now report:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `status` | `"ok"` | Liveness: process is alive |
+| `mock_mode` | `true` / `false` | Whether DEEPSEISMIC_MOCK_MODE is set |
+| `storage` | `"mock"` \| `"ok"` \| `"unreachable"` \| `"error"` | Readiness: storage ping result |
+| `storage_error` | string (when errored) | Human-readable error detail |
+
+The endpoint does a lightweight `list_blobs("catalog", max_results=1)` ping in
+real mode to confirm actual reachability. This is what Wash/infra should hit
+post-deploy: `storage == "ok"` means real mode is fully operational.
+
+---
+
+## Local Dev Contract
+
+- `DEEPSEISMIC_MOCK_MODE=true` → mock mode, no storage needed, all routes
+  return synthetic data.
+- Default (no env var) with Azurite running → real mode via the default
+  `STORAGE_CONNECTION_STRING` (Azurite emulator). Works with
+  `docker compose up azurite`.
+- Cloud deployment → set `AZURE_STORAGE_ACCOUNT` + managed identity.
+  `STORAGE_CONNECTION_STRING` should be absent or explicitly cleared.
+
+---
+
+## Container Name Contract (infra issue #11 — respected)
+
+No container names changed. Verified names in use:
+- `raw` — SEG-Y landing
+- `staged` — Zarr volumes after ingest
+- `results` — inference output (fault_prob.zarr, fault_mask.zarr)
+- `catalog` — JSON manifests, metadata sidecars
+- `features` — ML checkpoint blobs
+
+---
+
+## Test / Lint Status
+
+- `python -m pytest -m "not integration" -q`: **211 passed, 2 skipped** ✅
+- `python -m ruff check src/`: **All checks passed** ✅
+
+---
+
+## Files Changed
+
+- `src/deepseismic/api/dependencies.py`
+- `src/deepseismic/api/main.py`
+- `src/deepseismic/api/routes/interpretation.py`
+- `src/deepseismic/api/routes/surveys.py`
+- `src/deepseismic/api/routes/wells.py`
+- `src/deepseismic/api/routes/browse.py`
+
+
+---
+
+# BUG-1 Fix: survey_id not embedded in catalog sidecar
+
+**Date:** 2026-06-25  
+**Author:** Parker (Backend/API)  
+**Flagged by:** Hudson (Tester) in `hudson-s3-integration-tests.md`  
+**Sprint:** 3 follow-up
+
+---
+
+## Problem
+
+`_run_ingest()` in `src/deepseismic/api/routes/surveys.py` calls `SEGYLoader.to_zarr()` without passing `survey_id`:
+
+```python
+# before
+_, meta = ldr.to_zarr(zarr_path, overwrite=True)
+```
+
+`to_zarr()` added a `survey_id: str | None = None` keyword parameter in Sprint 3 Wave 1 (Dallas). Because `_run_ingest` never passed it, `meta.survey_id` was always `None`. The sidecar JSON written to `catalog/surveys/{survey_id}/metadata.json` therefore contained `"survey_id": null`, breaking downstream consumers that read this field to identify the survey.
+
+---
+
+## Fix
+
+**File:** `src/deepseismic/api/routes/surveys.py`, line 181
+
+```python
+# after
+_, meta = ldr.to_zarr(zarr_path, overwrite=True, survey_id=req.survey_id)
+```
+
+`req.survey_id` is already used elsewhere in `_run_ingest` (for the zarr path and the blob paths), so it is always in scope.
+
+---
+
+## Test Update
+
+**File:** `src/tests/test_api/test_api_real_mode.py`  
+**Test:** `test_run_ingest_catalog_metadata_is_valid_json`
+
+The test previously had a comment documenting that `survey_id` would be `None` in the sidecar (a known bug). Now that the bug is fixed, the comment is removed and replaced with an assertion:
+
+```python
+assert meta.get("survey_id") == survey_id
+```
+
+All other assertions (`geometry`, `amplitude_stats`, `ingested_at`) are unchanged.
+
+---
+
+## Validation
+
+- `python -m pytest -m "not integration" -q` → **292 passed, 2 skipped** (no regressions)
+- `python -m ruff check src/` → **All checks passed**
+
+
+---
+
+# Decision Note: Sprint 3 Documentation — Real-Data Readiness Honest Narrative
+
+**Author:** Ripley (Lead/Architect)  
+**Date:** 2026-06-25T09:34:00-05:00  
+**Sprint:** Sprint 3  
+**Issues addressed:** #7 (ingest readiness), #8 (dense labels), #9 (API/agent de-mock)  
+**Status:** Docs complete ✅
+
+---
+
+## Context
+
+Sprint 3 made the app **ready** to consume real Volve ST10010 data. Real-data
+**execution** is blocked on infrastructure and data-access dependencies outside this
+repo (Spava-Corp/deepseismic2-infra). The documentation job was to accurately reflect
+that distinction — applying the Sprint 2 anti-overclaiming standard.
+
+---
+
+## Documentation decisions
+
+### 1. Framing vocabulary
+
+Two terms defined and used consistently:
+
+- **App-ready** — code path exists, locally validated against a format proxy.
+  No real Volve data involved. Safe to claim.
+- **Deploy-gated** — execution on real data requires external dependencies (infra
+  #11 + Marketplace install + in-VNet compute). These are not code gaps.
+
+This vocabulary prevents the "code exists at every stage therefore pipeline is complete"
+overclaim that Sprint 2 identified and fixed.
+
+### 2. README.md changes
+
+- Status updated: "Sprint 3 complete — real-data app-readiness. Real-data execution is
+  deploy-gated." No claim of real execution.
+- Real-vs-demo table extended with Sprint 3 rows: `scripts/ingest_segy.py`,
+  `--storage-backend azure`, dense label directory mode, API/agent real mode defaults,
+  enhanced health endpoint.
+- New section "Real-data readiness (Sprint 3)": app-ready list, deploy-gated list,
+  explicit blockers table (infra #11, Marketplace, private endpoints).
+- Sprint 3 results numbers: 0.30% positive-voxel fraction labeled clearly as
+  "synthetic-proxy only — NOT real Volve results."
+- Sprint 3 smoke-test commands added (synthetic proxy path).
+- In-VNet execution commands added with clear "requires infra #11" note.
+- Sprint 1–2 count updated (156 → 211 tests).
+
+### 3. docs/real-data-runbook.md (new file)
+
+Ordered deploy path: B1/B2/B3 blockers → infra check → ingest → labels → train/eval
+→ API real mode → agent real mode. Each step notes VNet requirement and which env vars
+select real vs. mock.
+
+Env var table documents all mode-selection variables in one place:
+`DEEPSEISMIC_MOCK_MODE`, `MOCK_LLM`, `AZURE_STORAGE_ACCOUNT`,
+`STORAGE_CONNECTION_STRING`, `AZURE_PROJECT_ENDPOINT`.
+
+### 4. docs/task-framing.md changes
+
+Added Sprint 3 paragraph: directory-based label pipeline, between-pick interpolation,
+0.30% synthetic-proxy number with explicit NOT-real-Volve caveat. Summary table updated.
+Core task-mismatch framing (binary fault detection vs. multi-class facies) unchanged —
+this is a permanent architectural fact.
+
+---
+
+## Anti-overclaiming checklist (Sprint 2 standard)
+
+| Claim | Checked |
+|-------|---------|
+| No claim of real ST10010 data processed | ✅ |
+| Synthetic-proxy validation labeled everywhere it appears | ✅ |
+| Blockers framed as infra/user dependencies, not code gaps | ✅ |
+| "App-ready" never conflated with "validated on real data" | ✅ |
+| In-VNet requirement explicit in all real-data commands | ✅ |
+| 0.30% positive-fraction number labeled synthetic-proxy | ✅ |
+| infra #11 cited as the upstream dependency | ✅ |
+
+---
+
+## Files changed
+
+- `README.md` — Status section fully rewritten for Sprint 3
+- `docs/real-data-runbook.md` — New file
+- `docs/task-framing.md` — Sprint 3 addendum
+- `.squad/agents/ripley/history.md` — Sprint 3 learnings appended
 

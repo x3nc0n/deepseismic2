@@ -387,6 +387,7 @@ with gr.Blocks(
         with gr.Column(scale=1, min_width=420):
             chatbot = gr.Chatbot(
                 label="Agent Conversation",
+                type="messages",
             )
 
             with gr.Row():

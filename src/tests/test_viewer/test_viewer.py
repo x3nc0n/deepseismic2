@@ -474,3 +474,31 @@ class TestGradioSliderRegression:
             "gr.update(minimum=lo, ...) reintroduces the #20 stale-value 422 bug; "
             "keep minimum=0 and clamp the inline in handlers instead."
         )
+
+    def test_chatbot_uses_messages_type(self, source: str) -> None:
+        """Every gr.Chatbot must set type='messages' (#22 guard).
+
+        The chat handlers produce/consume the messages format (list of
+        {role, content} dicts).  A Chatbot left at the default type='tuples'
+        fails Gradio input validation on the 2nd interaction (non-empty dict
+        history) -> HTTP 422 with an HTML body -> 'Unexpected token <'.
+        """
+        tree = ast.parse(source)
+        chatbots = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Chatbot"
+        ]
+        assert chatbots, "No gr.Chatbot call found in gradio_app.py"
+        for cb in chatbots:
+            type_kw = next((k for k in cb.keywords if k.arg == "type"), None)
+            assert type_kw is not None, (
+                "gr.Chatbot is missing type='messages' (#22): defaults to "
+                "'tuples' and 422s on the 2nd message."
+            )
+            assert (
+                isinstance(type_kw.value, ast.Constant)
+                and type_kw.value.value == "messages"
+            ), "gr.Chatbot type must be 'messages' to match the handler format (#22)."

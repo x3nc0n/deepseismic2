@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deepseismic2"
-version = "0.6.1"
+version = "0.6.2"
 description = "Cloud-native seismic interpretation proof of concept"
 readme = "README.md"
 requires-python = ">=3.11"

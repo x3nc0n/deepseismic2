@@ -502,3 +502,48 @@ class TestGradioSliderRegression:
                 isinstance(type_kw.value, ast.Constant)
                 and type_kw.value.value == "messages"
             ), "gr.Chatbot type must be 'messages' to match the handler format (#22)."
+
+
+class TestGradioAppInsights:
+    """Guard the Application Insights instrumentation of the UI (#23).
+
+    Infra injects ``APPLICATIONINSIGHTS_CONNECTION_STRING`` into the hosted UI
+    container.  The app must call ``configure_azure_monitor`` at module level
+    (before ``demo.launch()``), guarded so it is a no-op when the env var is
+    absent (local/test runs) and never breaks the UI if the package or
+    connection fails.
+    """
+
+    _APP_PATH = _REPO_ROOT / "src/deepseismic/ui/gradio_app.py"
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        assert self._APP_PATH.exists(), f"gradio_app.py not found: {self._APP_PATH}"
+        return self._APP_PATH.read_text(encoding="utf-8")
+
+    def test_configures_azure_monitor(self, source: str) -> None:
+        assert "configure_azure_monitor" in source, (
+            "UI must call configure_azure_monitor for App Insights (#23)."
+        )
+
+    def test_guarded_on_connection_string(self, source: str) -> None:
+        assert "APPLICATIONINSIGHTS_CONNECTION_STRING" in source, (
+            "App Insights init must be guarded on the connection-string env var "
+            "so it is a no-op without infra's injected value (#23)."
+        )
+
+    def test_init_is_module_level_and_before_launch(self, source: str) -> None:
+        # Telemetry must be configured before the server starts.  Compare
+        # against the actual demo.launch() call (last occurrence — the top
+        # docstring also mentions it).
+        assert "configure_azure_monitor" in source and "demo.launch" in source
+        assert source.index("configure_azure_monitor") < source.rindex("demo.launch"), (
+            "configure_azure_monitor must run before demo.launch() (#23)."
+        )
+
+    def test_dependency_declared(self) -> None:
+        pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        assert "azure-monitor-opentelemetry" in pyproject, (
+            "azure-monitor-opentelemetry must be a declared dependency (#23)."
+        )
+

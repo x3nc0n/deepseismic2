@@ -18,6 +18,7 @@ Or with mock mode::
 from __future__ import annotations
 
 import io
+import logging
 import os
 from typing import Any
 
@@ -31,6 +32,32 @@ from deepseismic.ui import _viewer_api as vapi
 from deepseismic.ui._viewer_api import ViewerAPIError
 
 matplotlib.use("Agg")  # Non-interactive backend for server rendering
+
+# ---------------------------------------------------------------------------
+# Application Insights (issue #23)
+# ---------------------------------------------------------------------------
+# No-op unless APPLICATIONINSIGHTS_CONNECTION_STRING is set (injected by infra
+# in the hosted UI container).  Auto-instruments the FastAPI/Starlette server
+# Gradio runs on, so HTTP requests — including the /queue/join 422s behind the
+# chat/slider bugs — and exceptions are exported as request/exception
+# telemetry.  Must run before demo.launch(); module-level placement guarantees
+# that regardless of entrypoint, and keeps it a no-op for local/test runs.
+logger = logging.getLogger("deepseismic.ui")
+logger.setLevel(logging.INFO)
+
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    # Cloud role name so the UI is distinct from the API in the App Map.
+    os.environ.setdefault("OTEL_SERVICE_NAME", "deepseismic2-ui")
+    try:
+        from azure.monitor.opentelemetry import configure_azure_monitor
+
+        configure_azure_monitor(logger_name="deepseismic.ui")
+        logger.info("Application Insights telemetry configured for the Gradio UI.")
+    except Exception:  # noqa: BLE001 — telemetry must never break the UI
+        logging.getLogger(__name__).warning(
+            "Application Insights init failed; continuing without UI telemetry.",
+            exc_info=True,
+        )
 
 MOCK_MODE: bool = os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes")
 API_BASE_URL: str = vapi.api_base_url()
@@ -297,6 +324,7 @@ def _chat(
         response = "".join(chunks)
 
     except Exception as exc:
+        logger.exception("Agent chat failed: %s", type(exc).__name__)
         response = f"⚠️ **Agent error**: {type(exc).__name__}: {exc}"
 
     history = history + [

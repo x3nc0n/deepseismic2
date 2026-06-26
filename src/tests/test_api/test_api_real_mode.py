@@ -594,3 +594,69 @@ class TestOverlayCoordMapping:
             resp = client.get(f"/api/interpretation/{run_id}/overlay/10300")
         assert resp.status_code == 404
         assert "window" in resp.json()["detail"].lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestSmallSurveyInference — patch_size clamps to volume shape (issue #21)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSmallSurveyInference:
+    """Fault detection must not error when the survey is smaller than the patch."""
+
+    def _setup(self, tmp_path: Path) -> tuple[Any, str]:
+        import numpy as np
+        import zarr
+
+        from deepseismic.models.unet import UNet3D, UNetConfig
+
+        storage = _ZarrStorageClient()
+
+        # Tiny synthetic checkpoint (depth 3 so 32/8/16 patches pool cleanly).
+        model = UNet3D(UNetConfig(in_channels=1, out_channels=1, init_features=4, depth=3))
+        ckpt_path = tmp_path / "unet.pt"
+        model.save_checkpoint(ckpt_path, epoch=0, metrics={"iou": 0.0})
+        storage.upload_blob("features", "checkpoints/unet3d_best.pt", ckpt_path.read_bytes())
+
+        # Small survey: only 50 inlines (< default patch_size[0]=32 is fine,
+        # but the regression is patch 64 > 50; we exercise the clamp by asking
+        # for an oversized patch below).
+        n_il, n_xl, n_s = 50, 16, 32
+        amp = np.random.RandomState(0).randn(n_il, n_xl, n_s).astype("float32")
+        store = zarr.storage.LocalStore(str(tmp_path / "amplitude.zarr"))
+        root = zarr.open_group(store, mode="w")
+        root.create_array("amplitude", data=amp)
+        root.create_array("inline", data=np.arange(100, 100 + n_il, dtype="int32"))
+        root.create_array("crossline", data=np.arange(200, 200 + n_xl, dtype="int32"))
+        root.create_array("twtt_ms", data=(np.arange(n_s) * 4.0).astype("float32"))
+        storage.register_zarr("staged", "surveys/small/amplitude.zarr", store)
+        return storage, "small"
+
+    def test_oversized_patch_is_clamped_and_run_completes(self, tmp_path: Path) -> None:
+        """patch_size (64,64,64) on a 50-inline survey must clamp, not error."""
+        import deepseismic.api.routes.interpretation as interp
+        from deepseismic.api.schemas import InterpretationRequest
+
+        storage, survey_id = self._setup(tmp_path)
+        run_id = "small-run-1"
+        interp._interp_jobs[run_id] = {"status": "queued"}
+        try:
+            req = InterpretationRequest(
+                survey_id=survey_id,
+                patch_size=(64, 64, 64),  # larger than the 50-inline volume
+                inline_center=120,
+                inline_window=8,
+            )
+            interp._run_fault_detection(run_id, req, storage)
+            job = interp._interp_jobs[run_id]
+            assert job["status"] == "complete", job
+            assert "fault_voxel_fraction" in job
+        finally:
+            interp._interp_jobs.pop(run_id, None)
+
+    def test_default_patch_size_is_32(self) -> None:
+        """Default patch matches the shipped checkpoint's 32^3 training config."""
+        from deepseismic.api.schemas import InterpretationRequest
+
+        req = InterpretationRequest(survey_id="x")
+        assert tuple(req.patch_size) == (32, 32, 32)

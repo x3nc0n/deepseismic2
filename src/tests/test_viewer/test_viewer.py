@@ -441,3 +441,36 @@ class TestViewerModuleRegression:
             "String 'fault_probability' not found in streamlit_app.py or _data_readers.py"
             " — array name contract may be broken"
         )
+
+
+class TestGradioSliderRegression:
+    """Guard the Gradio inline-slider bounds bug (#20).
+
+    The slider's server-side ``minimum`` must never be raised to the survey's
+    first inline: a stale client value (0) below a raised minimum makes Gradio
+    return an HTTP 422 with an HTML body, which the browser-side client cannot
+    parse ('Unexpected token <').  The fix keeps ``minimum=0`` and clamps the
+    inline inside the handlers via ``_clamp_inline``.
+    """
+
+    _APP_PATH = _REPO_ROOT / "src/deepseismic/ui/gradio_app.py"
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        assert self._APP_PATH.exists(), f"gradio_app.py not found: {self._APP_PATH}"
+        return self._APP_PATH.read_text(encoding="utf-8")
+
+    def test_parses(self, source: str) -> None:
+        assert isinstance(ast.parse(source), ast.Module)
+
+    def test_clamp_helper_defined(self, source: str) -> None:
+        tree = ast.parse(source)
+        names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        assert "_clamp_inline" in names, "_clamp_inline helper missing (#20 guard)"
+
+    def test_slider_minimum_not_raised_to_lo(self, source: str) -> None:
+        # The buggy pattern raised the slider minimum to `lo`.
+        assert "minimum=lo" not in source, (
+            "gr.update(minimum=lo, ...) reintroduces the #20 stale-value 422 bug; "
+            "keep minimum=0 and clamp the inline in handlers instead."
+        )

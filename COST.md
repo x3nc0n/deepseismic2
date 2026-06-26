@@ -123,3 +123,4 @@ Estimated monthly costs for the PoC environment based on Ripley's architecture p
 | 2026-06-25 | Added real ST10010 ingest session ($1.50): first real Volve data ingested to staged; cumulative 11 sessions, ~$31.55 |
 | 2026-06-25 | Added #13 triage + UI live-inference session ($2.00): fixed Gradio placeholder-fallback bugs (#17/#18), live UNet3D trigger, v0.5.0 release; cumulative 12 sessions, ~$33.55 |
 | 2026-06-26 | Added #19 OOM + empty-browse session ($2.00): bounded subvolume inference (inline_center/window), float32 accumulators, absolute-inline overlay mapping, delimiter-based storage browse, checkpoint OS-portability; v0.6.0 release; cumulative 13 sessions, ~$35.55 |
+| 2026-06-26 | Added infra demo-bug session ($1.50): fixed #20 (slider stale-value 422 → keep minimum=0 + clamp) and #21 (patch_size clamp to volume + 32³ default); v0.6.1 release; cumulative 14 sessions, ~$37.05 |

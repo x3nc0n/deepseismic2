@@ -583,12 +583,27 @@ with gr.Blocks(
         import PIL.Image
         return np.array(PIL.Image.open(io.BytesIO(png_bytes)))
 
+    def _clamp_inline(inline: int, state: dict) -> int:
+        """Clamp an inline into the loaded survey's valid range.
+
+        The slider keeps ``minimum=0`` so Gradio never server-side rejects a
+        stale value (#20 — a raised minimum 422'd on the 2nd interaction with
+        an HTML body the browser couldn't parse).  Values outside the survey
+        range are clamped here instead.
+        """
+        geom = state.get("geom")
+        if geom is None:
+            return int(inline)
+        lo, hi, _ = geom.inline_choices_bounds()
+        return int(min(max(int(inline), lo), hi))
+
     def _render(inline: int, show_overlay: bool, demo_mode: bool, state: dict):
         """Render the section for the current survey/run. Returns (image, status)."""
         survey_id = state.get("survey_id")
         if not demo_mode and not survey_id:
             png = _error_image("No survey selected — pick one from the Survey dropdown.")
             return _png_to_np(png), "🔴 **No survey selected.**"
+        inline = _clamp_inline(inline, state)
         png, status = _render_section_image(
             int(inline),
             survey_id or "demo",
@@ -629,13 +644,16 @@ with gr.Blocks(
         state["geom"] = geom
         lo, hi, step = geom.inline_choices_bounds()
         img, status = _render(lo, show_overlay, demo_mode, state)
-        slider = gr.update(minimum=lo, maximum=hi, step=step, value=lo)
+        # Keep minimum=0 — raising it makes Gradio 422 on a stale client value
+        # (#20). The handlers clamp the inline into [lo, hi] instead.
+        slider = gr.update(minimum=0, maximum=hi, step=step, value=lo)
         return slider, img, status, state, ""
 
     def _start_inference(inline: int, state: dict):
         survey_id = state.get("survey_id")
         if not survey_id:
             return state, "🔴 Select a survey before running inference."
+        inline = _clamp_inline(inline, state)
         try:
             run_id = vapi.start_fault_detection(
                 survey_id,

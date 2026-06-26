@@ -120,7 +120,14 @@ class InterpretationRequest(BaseModel):
         "checkpoints/unet3d_best.pt",
         description="Blob path in 'features' container for the model checkpoint",
     )
-    patch_size: tuple[int, int, int] = Field((64, 64, 64))
+    patch_size: tuple[int, int, int] = Field(
+        (32, 32, 32),
+        description=(
+            "Sliding-window patch (inline, crossline, sample). Defaults to "
+            "32^3 to match the shipped checkpoint's training config and fit "
+            "small surveys; auto-clamped per-axis to the volume shape (#21)."
+        ),
+    )
     overlap: float = Field(0.25, ge=0.0, lt=1.0)
     batch_size: int = Field(4, ge=1)
     threshold: float = Field(0.5, ge=0.0, le=1.0)

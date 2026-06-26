@@ -141,6 +141,19 @@ def _run_fault_detection(run_id: str, req: InterpretationRequest, storage: Any) 
             crossline_arr = np.asarray(root["crossline"][:])
             twtt_arr = np.asarray(root["twtt_ms"][:])
 
+            # Clamp the patch to the volume so small surveys degrade
+            # gracefully instead of erroring (#21): a survey with fewer
+            # inlines than patch_size[0] (e.g. 50 < 64) cannot host a 64-thick
+            # patch.  Clamping per-axis keeps inference valid on any size.
+            patch = tuple(
+                int(min(p, d)) for p, d in zip(req.patch_size, seismic.shape, strict=False)
+            )
+            if patch != tuple(req.patch_size):
+                logger.info(
+                    "Clamped patch_size %s -> %s to fit volume shape %s (run %s)",
+                    tuple(req.patch_size), patch, tuple(seismic.shape), run_id,
+                )
+
             # Bound to a subvolume around the requested inline (issue #19):
             # the full ST10010 cube needs >8 GiB of accumulators, but the
             # viewer only renders one inline, so a +/-window slab is enough
@@ -153,7 +166,7 @@ def _run_fault_detection(run_id: str, req: InterpretationRequest, storage: Any) 
                         0, len(inline_arr) - 1,
                     )
                 )
-                min_thick = int(req.patch_size[0])
+                min_thick = patch[0]
                 half = max(int(req.inline_window), min_thick // 2 + 1)
                 il0 = max(0, center_idx - half)
                 il1 = min(seismic.shape[0], center_idx + half + 1)
@@ -175,7 +188,7 @@ def _run_fault_detection(run_id: str, req: InterpretationRequest, storage: Any) 
 
             engine = VolumeInference.from_checkpoint(
                 ckpt_path,
-                patch_size=req.patch_size,
+                patch_size=patch,
                 overlap=req.overlap,
                 batch_size=req.batch_size,
                 threshold=req.threshold,

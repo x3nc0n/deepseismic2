@@ -129,34 +129,32 @@ def browse_container(
         items = mock_container.get(prefix, [])
         return BrowseResponse(container=container, prefix=prefix, items=items)
 
-    # Real storage: list blobs and extract virtual folders
+    # Real storage: hierarchical listing via delimiter — returns only the
+    # immediate level (virtual folders + files), NOT every blob in the
+    # container.  A flat list_blobs over a large container (e.g. the multi-TB
+    # `raw` lake) iterates hundreds of thousands of blobs and times out, which
+    # is what made the UI browser appear empty.
     try:
         cc = storage._container(container)
         items: list[BrowseItem] = []
-        seen_folders: set[str] = set()
 
-        for blob in cc.list_blobs(name_starts_with=prefix or None):
-            # Strip prefix to get relative path
-            relative = blob.name[len(prefix):] if prefix else blob.name
-
-            # If there's a / in relative, it's in a subfolder
-            if "/" in relative:
-                folder_name = relative.split("/")[0]
-                folder_path = f"{prefix}{folder_name}/"
-                if folder_path not in seen_folders:
-                    seen_folders.add(folder_path)
-                    items.append(BrowseItem(
-                        name=folder_name,
-                        path=folder_path,
-                        type="folder",
-                    ))
+        for blob in cc.walk_blobs(name_starts_with=prefix or None, delimiter="/"):
+            name = blob.name
+            relative = name[len(prefix):] if prefix else name
+            if name.endswith("/"):
+                # Virtual folder (BlobPrefix) — name ends with the delimiter.
+                folder_name = relative.rstrip("/").split("/")[-1]
+                items.append(BrowseItem(
+                    name=folder_name,
+                    path=name,
+                    type="folder",
+                ))
             else:
-                # Direct file at this level
                 items.append(BrowseItem(
                     name=relative,
-                    path=blob.name,
+                    path=name,
                     type="file",
-                    size=blob.size,
+                    size=getattr(blob, "size", None),
                 ))
 
         return BrowseResponse(container=container, prefix=prefix, items=items)

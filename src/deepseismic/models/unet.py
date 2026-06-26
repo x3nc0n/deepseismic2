@@ -54,6 +54,24 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_metrics(value: Any) -> Any:
+    """Coerce checkpoint metrics to JSON-safe scalars, recursively.
+
+    Checkpoints must load on any OS.  Embedding non-portable objects such as
+    ``pathlib.WindowsPath`` (e.g. nested in a serialized train config) causes
+    ``cannot instantiate 'WindowsPath'`` when a Windows-saved checkpoint is
+    loaded on Linux (issue #19).  Keep primitive scalars; recurse into
+    dicts/lists/tuples; stringify everything else.
+    """
+    if isinstance(value, bool | int | float | str) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(k): _sanitize_metrics(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_sanitize_metrics(v) for v in value]
+    return str(value)
+
+
 # ---------------------------------------------------------------------------
 # Building blocks
 # ---------------------------------------------------------------------------
@@ -318,7 +336,7 @@ class UNet3D(nn.Module):
         if optimizer_state is not None:
             payload["optimizer_state_dict"] = optimizer_state
         if metrics is not None:
-            payload["metrics"] = metrics
+            payload["metrics"] = _sanitize_metrics(metrics)
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

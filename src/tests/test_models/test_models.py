@@ -247,6 +247,45 @@ class TestCheckpointSaveLoad:
         loaded = torch.load(buf, map_location="cpu")
         assert set(loaded.keys()) == original_keys
 
+    def test_checkpoint_metrics_are_os_portable(self, tmp_path) -> None:
+        """Path objects in metrics must be stringified (issue #19).
+
+        A WindowsPath pickled into the checkpoint raises
+        ``cannot instantiate 'WindowsPath'`` when loaded on Linux.  The saved
+        metrics must contain only JSON-safe scalars, including nested dicts.
+        """
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        model = _make_model(depth=3)
+        ckpt = tmp_path / "portable.pt"
+        model.save_checkpoint(
+            ckpt,
+            epoch=2,
+            metrics={
+                "iou": 0.7,
+                "checkpoint_dir": PureWindowsPath(r"C:\runs\zarr"),
+                "train_config": {"out": PurePosixPath("/tmp/out"), "lr": 5e-4},
+            },
+        )
+        # Load without any path classes available would fail if Paths leaked.
+        raw = torch.load(ckpt, map_location="cpu", weights_only=False)
+        metrics = raw["metrics"]
+
+        def _assert_scalar(value) -> None:
+            if isinstance(value, dict):
+                for v in value.values():
+                    _assert_scalar(v)
+            elif isinstance(value, list):
+                for v in value:
+                    _assert_scalar(v)
+            else:
+                assert isinstance(value, bool | int | float | str) or value is None
+
+        _assert_scalar(metrics)
+        assert metrics["iou"] == pytest.approx(0.7)
+        assert isinstance(metrics["checkpoint_dir"], str)
+        assert isinstance(metrics["train_config"]["out"], str)
+
 
 # ---------------------------------------------------------------------------
 # test_cpu_gpu_parity

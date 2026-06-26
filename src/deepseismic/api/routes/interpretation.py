@@ -137,6 +137,37 @@ def _run_fault_detection(run_id: str, req: InterpretationRequest, storage: Any) 
             )
             root = zarr.open_group(store, mode="r")
             seismic: zarr.Array = root["amplitude"]
+            inline_arr = np.asarray(root["inline"][:])
+            crossline_arr = np.asarray(root["crossline"][:])
+            twtt_arr = np.asarray(root["twtt_ms"][:])
+
+            # Bound to a subvolume around the requested inline (issue #19):
+            # the full ST10010 cube needs >8 GiB of accumulators, but the
+            # viewer only renders one inline, so a +/-window slab is enough
+            # and fits the baseline web container.
+            il0, il1 = 0, seismic.shape[0]
+            if req.inline_center is not None:
+                center_idx = int(
+                    np.clip(
+                        np.searchsorted(inline_arr, req.inline_center),
+                        0, len(inline_arr) - 1,
+                    )
+                )
+                min_thick = int(req.patch_size[0])
+                half = max(int(req.inline_window), min_thick // 2 + 1)
+                il0 = max(0, center_idx - half)
+                il1 = min(seismic.shape[0], center_idx + half + 1)
+                # Guarantee the slab is at least one patch thick.
+                if il1 - il0 < min_thick:
+                    il0 = max(0, min(il0, seismic.shape[0] - min_thick))
+                    il1 = min(seismic.shape[0], il0 + min_thick)
+                seismic_input: np.ndarray = np.asarray(
+                    seismic[il0:il1, :, :], dtype=np.float32
+                )
+            else:
+                seismic_input = seismic  # full-cube zarr (lazy)
+
+            sub_inline = inline_arr[il0:il1]
 
             # Local paths for output volumes
             prob_path = tmp / f"{run_id}_prob.zarr"
@@ -150,7 +181,7 @@ def _run_fault_detection(run_id: str, req: InterpretationRequest, storage: Any) 
                 threshold=req.threshold,
             )
             prob_vol, mask_vol = engine.run(
-                seismic,
+                seismic_input,
                 prob_output=prob_path,
                 mask_output=mask_path,
                 overwrite=True,
@@ -170,7 +201,9 @@ def _run_fault_detection(run_id: str, req: InterpretationRequest, storage: Any) 
 
             fault_fraction = float(mask_vol.sum()) / max(mask_vol.size, 1)
 
-        # Write run manifest to catalog
+        # Write run manifest to catalog — store the inline/crossline/twtt
+        # coordinates of the (sub)volume so the overlay endpoint can map an
+        # absolute inline to the correct local index.
         manifest = {
             "run_id": run_id,
             "survey_id": req.survey_id,
@@ -178,6 +211,9 @@ def _run_fault_detection(run_id: str, req: InterpretationRequest, storage: Any) 
             "prob_zarr_path": f"results/interpretation/{run_id}/fault_prob.zarr",
             "mask_zarr_path": f"results/interpretation/{run_id}/fault_mask.zarr",
             "fault_voxel_fraction": fault_fraction,
+            "inline_coords": [int(i) for i in sub_inline],
+            "crossline_coords": [int(x) for x in crossline_arr],
+            "twtt_ms": [float(t) for t in twtt_arr],
             "completed_at": datetime.now(UTC).isoformat(),
         }
         storage.upload_blob(
@@ -331,9 +367,26 @@ def get_results(run_id: str, storage: StorageClientDep) -> InterpretationResult:
 def get_overlay(
     run_id: str, inline_number: int, storage: StorageClientDep
 ) -> FaultOverlay:
-    """Return fault probability and binary mask for a single inline section."""
+    """Return fault probability + binary mask for a single **absolute** inline.
+
+    ``inline_number`` is the absolute survey inline (e.g. 9961-10361 for
+    ST10010).  It is mapped to the result volume's local index via the
+    coordinate arrays recorded in the run manifest, so bounded subvolume runs
+    (issue #19) resolve correctly.
+    """
     if is_mock_mode():
         return _mock_overlay(run_id, inline_number)
+
+    # Load the manifest to recover the (sub)volume coordinate mapping.
+    try:
+        raw = storage.download_blob("catalog", f"interpretation/{run_id}/status.json")
+        manifest = json.loads(raw)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found") from None
+
+    inline_coords = manifest.get("inline_coords") or []
+    crossline_coords = manifest.get("crossline_coords") or []
+    twtt_ms = manifest.get("twtt_ms") or []
 
     try:
         prob_store = storage.open_zarr_store(
@@ -348,25 +401,42 @@ def get_overlay(
         prob_arr: zarr.Array = prob_root["fault_probability"]
         mask_arr: zarr.Array = mask_root["fault_mask"]
 
-        # Resolve inline index — assume inline axis matches the source survey
-        if inline_number < 0 or inline_number >= prob_arr.shape[0]:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Inline index {inline_number} out of bounds",
-            )
+        # Map absolute inline -> local volume index via the manifest coords.
+        if inline_coords:
+            idx_matches = np.where(np.asarray(inline_coords) == inline_number)[0]
+            if len(idx_matches) == 0:
+                lo, hi = inline_coords[0], inline_coords[-1]
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"Inline {inline_number} is outside this run's window "
+                        f"[{lo}, {hi}]. Re-run fault detection centered on it."
+                    ),
+                )
+            il_idx = int(idx_matches[0])
+        else:
+            # Legacy/full-cube manifest without coords — treat as positional.
+            if inline_number < 0 or inline_number >= prob_arr.shape[0]:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Inline index {inline_number} out of bounds",
+                )
+            il_idx = inline_number
 
-        prob_slice = np.asarray(prob_arr[inline_number, :, :]).tolist()  # (n_xl, n_s)
-        mask_slice = np.asarray(mask_arr[inline_number, :, :]).tolist()
+        prob_slice = np.asarray(prob_arr[il_idx, :, :]).tolist()  # (n_xl, n_s)
+        mask_slice = np.asarray(mask_arr[il_idx, :, :]).tolist()
 
         n_xl, n_s = prob_arr.shape[1], prob_arr.shape[2]
-        crossline_coords = list(range(n_xl))
-        twtt_ms = [float(i * 4.0) for i in range(n_s)]
+        if not crossline_coords:
+            crossline_coords = list(range(n_xl))
+        if not twtt_ms:
+            twtt_ms = [float(i * 4.0) for i in range(n_s)]
 
         return FaultOverlay(
             run_id=run_id,
             inline_number=inline_number,
-            crossline_coords=crossline_coords,
-            twtt_ms=twtt_ms,
+            crossline_coords=[int(x) for x in crossline_coords],
+            twtt_ms=[float(t) for t in twtt_ms],
             fault_probability=prob_slice,
             fault_mask=mask_slice,
         )

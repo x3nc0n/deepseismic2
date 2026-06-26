@@ -124,6 +124,19 @@ class InterpretationRequest(BaseModel):
     overlap: float = Field(0.25, ge=0.0, lt=1.0)
     batch_size: int = Field(4, ge=1)
     threshold: float = Field(0.5, ge=0.0, le=1.0)
+    inline_center: int | None = Field(
+        None,
+        description=(
+            "Absolute inline to center a bounded run on. When set, inference "
+            "runs on a subvolume of +/- inline_window inlines (full XL x samples) "
+            "to fit the web container's memory. None runs the full cube."
+        ),
+    )
+    inline_window: int = Field(
+        32,
+        ge=1,
+        description="Inlines on each side of inline_center for a bounded run.",
+    )
 
 
 class InterpretationStatus(BaseModel):

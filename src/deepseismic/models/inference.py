@@ -239,8 +239,11 @@ class VolumeInference:
                     "Reduce patch_size or use a larger volume."
                 )
 
-        prob_acc   = np.zeros(vol_shape, dtype=np.float64)
-        weight_acc = np.zeros(vol_shape, dtype=np.float64)
+        # float32 accumulators — float64 would double the footprint and is the
+        # primary OOM cause on a full cube (issue #19): for ST10010
+        # [401x720x850] two float64 buffers alone are ~3.9 GB.
+        prob_acc   = np.zeros(vol_shape, dtype=np.float32)
+        weight_acc = np.zeros(vol_shape, dtype=np.float32)
 
         all_windows = list(_sliding_windows(vol_shape, self.patch_size, self.overlap))
         n_patches   = len(all_windows)

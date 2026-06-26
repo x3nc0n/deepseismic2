@@ -502,3 +502,95 @@ class TestAzuriteHealthIntegration:
             f"Expected real-mode storage status, got {body['storage']!r}"
         )
         assert body["storage"] != "mock"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestOverlayCoordMapping — absolute inline → subvolume local index (issue #19)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _ZarrStorageClient(_DictStorageClient):
+    """Dict store that also serves real on-disk zarr groups for overlays."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._zarr_stores: dict[tuple[str, str], Any] = {}
+
+    def register_zarr(self, container: str, prefix: str, store: Any) -> None:
+        self._zarr_stores[(container, prefix)] = store
+
+    def open_zarr_store(self, container: str, prefix: str) -> Any:
+        try:
+            return self._zarr_stores[(container, prefix)]
+        except KeyError:
+            raise FileNotFoundError(f"{container}/{prefix}") from None
+
+
+class TestOverlayCoordMapping:
+    """get_overlay must map an absolute inline to the bounded run's local index."""
+
+    def _make_run(self, tmp_path: Path, storage: _ZarrStorageClient) -> str:
+        import numpy as np
+        import zarr
+
+        run_id = "run-sub-1"
+        # Subvolume covering absolute inlines 10090..10094 (5 inlines).
+        inline_coords = [10090, 10091, 10092, 10093, 10094]
+        n_xl, n_s = 4, 6
+        prob = np.zeros((5, n_xl, n_s), dtype=np.float32)
+        # Make each inline index identifiable by its constant value.
+        for i in range(5):
+            prob[i, :, :] = float(i) / 10.0
+        mask = (prob > 0.25).astype("uint8")
+
+        for name, arr in (("fault_prob", prob), ("fault_mask", mask)):
+            store = zarr.storage.LocalStore(str(tmp_path / f"{name}.zarr"))
+            root = zarr.open_group(store, mode="w")
+            key = "fault_probability" if name == "fault_prob" else "fault_mask"
+            root.create_array(key, data=arr)
+            storage.register_zarr(
+                "results", f"interpretation/{run_id}/{name}.zarr", store
+            )
+
+        manifest = {
+            "run_id": run_id,
+            "survey_id": "volve-st10010",
+            "status": "complete",
+            "inline_coords": inline_coords,
+            "crossline_coords": [1961, 1962, 1963, 1964],
+            "twtt_ms": [0.0, 4.0, 8.0, 12.0, 16.0, 20.0],
+        }
+        storage.upload_blob(
+            "catalog",
+            f"interpretation/{run_id}/status.json",
+            json.dumps(manifest).encode(),
+        )
+        return run_id
+
+    def test_absolute_inline_maps_to_local_index(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        storage = _ZarrStorageClient()
+        run_id = self._make_run(tmp_path, storage)
+        _patch_real_mode(monkeypatch, storage)
+        with TestClient(app) as client:
+            # Absolute inline 10092 → local index 2 → constant 0.2.
+            resp = client.get(f"/api/interpretation/{run_id}/overlay/10092")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["inline_number"] == 10092
+        assert body["fault_probability"][0][0] == pytest.approx(0.2)
+        # Real crossline/twtt coords come from the manifest, not range(0..n).
+        assert body["crossline_coords"][0] == 1961
+        assert body["twtt_ms"][1] == pytest.approx(4.0)
+
+    def test_inline_outside_window_returns_404(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        storage = _ZarrStorageClient()
+        run_id = self._make_run(tmp_path, storage)
+        _patch_real_mode(monkeypatch, storage)
+        with TestClient(app) as client:
+            resp = client.get(f"/api/interpretation/{run_id}/overlay/10300")
+        assert resp.status_code == 404
+        assert "window" in resp.json()["detail"].lower()

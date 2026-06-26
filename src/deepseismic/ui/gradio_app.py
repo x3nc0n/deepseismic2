@@ -60,20 +60,16 @@ def _get_agent() -> Any:
 # ---------------------------------------------------------------------------
 
 def _browse_storage(container: str, prefix: str = "") -> list[dict]:
-    """Fetch folder/file listing from the API browse endpoint."""
-    import requests
+    """Fetch folder/file listing from the API browse endpoint.
+
+    Best-effort variant (returns [] on error) kept for legacy helpers.  The
+    interactive listing uses :func:`vapi.browse` directly so it can surface
+    errors instead of silently showing an empty tree.
+    """
     try:
-        resp = requests.get(
-            f"{API_BASE_URL}/api/browse/{container}",
-            params={"prefix": prefix},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("items", [])
-    except Exception:
-        pass
-    return []
+        return vapi.browse(container, prefix, API_BASE_URL)
+    except ViewerAPIError:
+        return []
 
 
 def _format_browse_tree(container: str, prefix: str = "") -> str:
@@ -195,10 +191,10 @@ def _render_section_image(
             alpha=0.55, interpolation="bilinear", extent=extent,
         )
     elif show_fault_overlay and run_id and geom is not None:
-        # Real fault overlay from a completed UNet3D run.
+        # Real fault overlay from a completed UNet3D run.  Pass the absolute
+        # inline; the API maps it to the local volume index via the manifest.
         try:
-            idx = geom.inline_to_index(inline)
-            ov = vapi.fetch_overlay(run_id, idx, API_BASE_URL)
+            ov = vapi.fetch_overlay(run_id, inline, API_BASE_URL)
             prob = np.array(ov["fault_probability"], dtype=np.float32).T  # (n_s, n_xl)
             ax.imshow(
                 prob, aspect="auto", cmap=_FAULT_CMAP, vmin=0, vmax=1,
@@ -479,7 +475,11 @@ with gr.Blocks(
         """Return (dataframe_rows, breadcrumb_md, state)."""
         container = state["container"]
         prefix = state["prefix"]
-        items = _browse_storage(container, prefix)
+        try:
+            items = vapi.browse(container, prefix, API_BASE_URL)
+        except ViewerAPIError as exc:
+            crumb = f"🔴 **Browse error** for `{container}`: {exc}"
+            return [["⚠️", "(error)", "—", ""]], crumb, state
 
         rows = []
         for item in items:
@@ -632,19 +632,25 @@ with gr.Blocks(
         slider = gr.update(minimum=lo, maximum=hi, step=step, value=lo)
         return slider, img, status, state, ""
 
-    def _start_inference(state: dict):
+    def _start_inference(inline: int, state: dict):
         survey_id = state.get("survey_id")
         if not survey_id:
             return state, "🔴 Select a survey before running inference."
         try:
-            run_id = vapi.start_fault_detection(survey_id, CHECKPOINT_BLOB, API_BASE_URL)
+            run_id = vapi.start_fault_detection(
+                survey_id,
+                CHECKPOINT_BLOB,
+                API_BASE_URL,
+                inline_center=int(inline),
+            )
         except ViewerAPIError as exc:
             return state, f"🔴 **Could not start inference:** {exc}"
         state = dict(state)
         state["run_id"] = run_id
         return state, (
-            f"🟡 **Queued** run `{run_id[:8]}` on `{survey_id}`. "
-            "Click **Check status** to poll, then toggle the fault overlay."
+            f"🟡 **Queued** run `{run_id[:8]}` on `{survey_id}` around inline "
+            f"{int(inline)}. Click **Check status** to poll, then toggle the "
+            "fault overlay."
         )
 
     def _check_inference(inline: int, show_overlay: bool, demo_mode: bool, state: dict):
@@ -702,7 +708,7 @@ with gr.Blocks(
     )
     run_infer_btn.click(
         _start_inference,
-        inputs=[_viewer_state],
+        inputs=[inline_slider, _viewer_state],
         outputs=[_viewer_state, infer_status],
     )
     check_infer_btn.click(

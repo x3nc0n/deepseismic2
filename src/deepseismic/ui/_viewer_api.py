@@ -155,8 +155,42 @@ def fetch_inline(
 
 
 # ---------------------------------------------------------------------------
-# Live UNet3D fault detection
+# Storage browser
 # ---------------------------------------------------------------------------
+
+
+def browse(
+    container: str,
+    prefix: str = "",
+    base_url: str | None = None,
+    *,
+    timeout: float = 30.0,
+) -> list[dict[str, Any]]:
+    """List one level of a storage container via ``GET /api/browse/{container}``.
+
+    Returns the ``items`` list (folders + files at *prefix*).  Raises
+    :class:`ViewerAPIError` on failure so the UI surfaces *why* a listing is
+    empty rather than silently showing nothing.
+    """
+    import requests
+
+    base = base_url or api_base_url()
+    try:
+        resp = requests.get(
+            f"{base}/api/browse/{container}",
+            params={"prefix": prefix},
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ViewerAPIError(f"Could not reach API at {base}: {exc}") from exc
+    if resp.status_code != 200:
+        raise ViewerAPIError(
+            f"Browse '{container}/{prefix}' failed: "
+            f"HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+    data = resp.json() or {}
+    return data.get("items", [])
+
 
 
 def start_fault_detection(
@@ -165,17 +199,26 @@ def start_fault_detection(
     base_url: str | None = None,
     *,
     threshold: float = 0.5,
+    inline_center: int | None = None,
+    inline_window: int = 32,
     timeout: float = 30.0,
 ) -> str:
-    """POST ``/api/interpretation/fault-detection`` and return the ``run_id``."""
+    """POST ``/api/interpretation/fault-detection`` and return the ``run_id``.
+
+    When ``inline_center`` is given, the API bounds inference to a +/-
+    ``inline_window`` inline slab (issue #19) so it fits the web container.
+    """
     import requests
 
     base = base_url or api_base_url()
-    payload = {
+    payload: dict[str, Any] = {
         "survey_id": survey_id,
         "checkpoint_blob": checkpoint_blob,
         "threshold": threshold,
+        "inline_window": inline_window,
     }
+    if inline_center is not None:
+        payload["inline_center"] = inline_center
     try:
         resp = requests.post(
             f"{base}/api/interpretation/fault-detection", json=payload, timeout=timeout
@@ -214,22 +257,23 @@ def poll_status(
 
 def fetch_overlay(
     run_id: str,
-    inline_index: int,
+    inline_number: int,
     base_url: str | None = None,
     *,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    """GET ``/api/interpretation/{run_id}/overlay/{inline_index}``.
+    """GET ``/api/interpretation/{run_id}/overlay/{inline_number}``.
 
-    ``inline_index`` is a 0-based **volume index** (use
-    :meth:`SurveyGeometry.inline_to_index`), not an absolute inline number.
+    ``inline_number`` is the **absolute** survey inline (e.g. 9961-10361).
+    The API maps it to the result volume's local index via the run manifest,
+    so bounded subvolume runs resolve correctly.
     """
     import requests
 
     base = base_url or api_base_url()
     try:
         resp = requests.get(
-            f"{base}/api/interpretation/{run_id}/overlay/{inline_index}",
+            f"{base}/api/interpretation/{run_id}/overlay/{inline_number}",
             timeout=timeout,
         )
     except Exception as exc:  # noqa: BLE001

@@ -174,3 +174,53 @@ class TestInference:
         with patch("requests.get", return_value=_resp(200, {"fault_probability": None})):
             with pytest.raises(ViewerAPIError):
                 vapi.fetch_overlay("abc", 0, BASE)
+
+    def test_start_sends_inline_center_window(self) -> None:
+        """Bounded run (issue #19) forwards inline_center + inline_window."""
+        with patch(
+            "requests.post", return_value=_resp(202, {"run_id": "r1"})
+        ) as mock_post:
+            vapi.start_fault_detection(
+                "s", base_url=BASE, inline_center=10100, inline_window=24
+            )
+        _, kwargs = mock_post.call_args
+        payload = kwargs["json"]
+        assert payload["inline_center"] == 10100
+        assert payload["inline_window"] == 24
+
+    def test_start_omits_inline_center_when_none(self) -> None:
+        """Full-cube run must not send inline_center (back-compat)."""
+        with patch(
+            "requests.post", return_value=_resp(202, {"run_id": "r1"})
+        ) as mock_post:
+            vapi.start_fault_detection("s", base_url=BASE)
+        _, kwargs = mock_post.call_args
+        assert "inline_center" not in kwargs["json"]
+
+
+# ---------------------------------------------------------------------------
+# browse (storage browser) — fail-loud
+# ---------------------------------------------------------------------------
+
+
+class TestBrowse:
+    def test_returns_items(self) -> None:
+        body = {"items": [{"name": "surveys", "type": "folder"}]}
+        with patch("requests.get", return_value=_resp(200, body)):
+            items = vapi.browse("staged", "", BASE)
+        assert items == [{"name": "surveys", "type": "folder"}]
+
+    def test_empty_items_ok(self) -> None:
+        with patch("requests.get", return_value=_resp(200, {"items": []})):
+            assert vapi.browse("staged", "x/", BASE) == []
+
+    def test_http_error_raises(self) -> None:
+        with patch("requests.get", return_value=_resp(500, text="boom")):
+            with pytest.raises(ViewerAPIError, match="Browse"):
+                vapi.browse("raw", "", BASE)
+
+    def test_transport_error_raises(self) -> None:
+        with patch("requests.get", side_effect=RuntimeError("dns")):
+            with pytest.raises(ViewerAPIError):
+                vapi.browse("raw", "", BASE)
+

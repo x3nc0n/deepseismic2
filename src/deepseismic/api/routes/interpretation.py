@@ -45,6 +45,58 @@ router = APIRouter(prefix="/interpretation", tags=["interpretation"])
 _interp_jobs: dict[str, dict[str, Any]] = {}
 
 
+def _resolve_run_id(run_id: str, storage: Any) -> str:
+    """Resolve a possibly-abbreviated ``run_id`` to a full run identifier.
+
+    The UI displays runs by their 8-char prefix (``run_id[:8]``), so users and
+    the chat agent only ever see/quote the prefix.  Looking that prefix up
+    against the full-UUID registry/catalog would 404.  This resolves a prefix
+    (or full id) to the single matching full run id by checking, in order:
+
+    1. an exact in-memory job key,
+    2. an exact persisted ``catalog`` manifest,
+    3. a unique prefix match across in-memory jobs **and** catalog manifests.
+
+    Returns the input unchanged if it already resolves exactly.  Raises 404 if
+    nothing matches and 409 if a prefix is ambiguous (>1 match).
+    """
+    # 1. Exact in-memory hit.
+    if run_id in _interp_jobs:
+        return run_id
+
+    # 2. Exact persisted manifest.
+    try:
+        storage.download_blob("catalog", f"interpretation/{run_id}/status.json")
+        return run_id
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001 — fall through to prefix search
+        pass
+
+    # 3. Unique prefix match across in-memory jobs + catalog manifests.
+    matches: set[str] = {rid for rid in _interp_jobs if rid.startswith(run_id)}
+    try:
+        for name in storage.list_blobs("catalog", "interpretation/"):
+            # name == "interpretation/{full_run_id}/status.json"
+            parts = name.split("/")
+            if len(parts) >= 2 and parts[1].startswith(run_id):
+                matches.add(parts[1])
+    except Exception:  # noqa: BLE001 — catalog listing is best-effort
+        pass
+
+    if len(matches) == 1:
+        return next(iter(matches))
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Run id '{run_id}' is ambiguous ({len(matches)} matches). "
+                "Provide more characters of the run id."
+            ),
+        )
+    raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+
 # ---------------------------------------------------------------------------
 # Mock data
 # ---------------------------------------------------------------------------
@@ -296,6 +348,11 @@ def run_fault_detection(
 @router.get("/{run_id}/status", response_model=InterpretationStatus)
 def get_status(run_id: str, storage: StorageClientDep) -> InterpretationStatus:
     """Poll the status of a fault detection run."""
+    if is_mock_mode():
+        return _mock_status(run_id)
+
+    run_id = _resolve_run_id(run_id, storage)
+
     if run_id in _interp_jobs:
         job = _interp_jobs[run_id]
         return InterpretationStatus(
@@ -307,10 +364,7 @@ def get_status(run_id: str, storage: StorageClientDep) -> InterpretationStatus:
             error=job.get("error"),
         )
 
-    if is_mock_mode():
-        return _mock_status(run_id)
-
-    # Attempt to load from catalog if the job survived a restart
+    # Load from catalog if the job survived a restart (resolve guarantees it exists)
     try:
         raw = storage.download_blob("catalog", f"interpretation/{run_id}/status.json")
         manifest = json.loads(raw)
@@ -332,6 +386,8 @@ def get_results(run_id: str, storage: StorageClientDep) -> InterpretationResult:
     """Return fault probability volume metadata and download URL for a completed run."""
     if is_mock_mode():
         return _mock_result(run_id)
+
+    run_id = _resolve_run_id(run_id, storage)
 
     # Check in-memory first
     if run_id in _interp_jobs:
@@ -389,6 +445,8 @@ def get_overlay(
     """
     if is_mock_mode():
         return _mock_overlay(run_id, inline_number)
+
+    run_id = _resolve_run_id(run_id, storage)
 
     # Load the manifest to recover the (sub)volume coordinate mapping.
     try:

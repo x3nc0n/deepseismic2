@@ -597,6 +597,86 @@ class TestOverlayCoordMapping:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TestRunIdPrefixResolution — UI shows run_id[:8]; the API must resolve the
+# abbreviated id the user/agent quotes back (chat-after-reload bug).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRunIdPrefixResolution:
+    """get_status/results must resolve an 8-char run-id prefix to the full run."""
+
+    def _persist_complete_run(self, storage: _DictStorageClient) -> str:
+        full_id = "d618bb63-1234-4abc-9def-0123456789ab"
+        manifest = {
+            "run_id": full_id,
+            "survey_id": "volve-st10010",
+            "status": "complete",
+            "prob_zarr_path": f"results/interpretation/{full_id}/fault_prob.zarr",
+            "mask_zarr_path": f"results/interpretation/{full_id}/fault_mask.zarr",
+            "fault_voxel_fraction": 0.012,
+            "completed_at": "2026-06-26T20:00:00+00:00",
+        }
+        storage.upload_blob(
+            "catalog",
+            f"interpretation/{full_id}/status.json",
+            json.dumps(manifest).encode(),
+        )
+        return full_id
+
+    def test_status_resolves_8char_prefix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage = _DictStorageClient()
+        full_id = self._persist_complete_run(storage)
+        _patch_real_mode(monkeypatch, storage)
+        with TestClient(app) as client:
+            resp = client.get(f"/api/interpretation/{full_id[:8]}/status")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["run_id"] == full_id
+        assert body["status"] == "complete"
+
+    def test_results_resolves_8char_prefix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage = _DictStorageClient()
+        full_id = self._persist_complete_run(storage)
+        _patch_real_mode(monkeypatch, storage)
+        with TestClient(app) as client:
+            resp = client.get(f"/api/interpretation/{full_id[:8]}/results")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["run_id"] == full_id
+
+    def test_unknown_prefix_returns_404(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage = _DictStorageClient()
+        self._persist_complete_run(storage)
+        _patch_real_mode(monkeypatch, storage)
+        with TestClient(app) as client:
+            resp = client.get("/api/interpretation/deadbeef/status")
+        assert resp.status_code == 404
+
+    def test_ambiguous_prefix_returns_409(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage = _DictStorageClient()
+        for suffix in ("aaaa", "bbbb"):
+            full_id = f"abc1234-{suffix}-4abc-9def-0123456789ab"
+            manifest = {"run_id": full_id, "survey_id": "s", "status": "complete"}
+            storage.upload_blob(
+                "catalog",
+                f"interpretation/{full_id}/status.json",
+                json.dumps(manifest).encode(),
+            )
+        _patch_real_mode(monkeypatch, storage)
+        with TestClient(app) as client:
+            resp = client.get("/api/interpretation/abc1234/status")
+        assert resp.status_code == 409
+        assert "ambiguous" in resp.json()["detail"].lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TestSmallSurveyInference — patch_size clamps to volume shape (issue #21)
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -697,7 +697,7 @@ with gr.Blocks(
         return state, (
             f"🟡 **Queued** run `{run_id[:8]}` on `{survey_id}` around inline "
             f"{int(inline)}. Click **Check status** to poll, then toggle the "
-            "fault overlay."
+            f"fault overlay.\n\n_Full run id (for the chat / API):_ `{run_id}`"
         )
 
     def _check_inference(inline: int, show_overlay: bool, demo_mode: bool, state: dict):

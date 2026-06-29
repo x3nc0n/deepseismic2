@@ -209,3 +209,25 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 **Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
 
+## Learnings — 2026-06-29T17:46:41-05:00: Issue Triage #25 and #26
+
+### Triage decisions
+
+**Issue #25 — Chat wedges on dangling tool_calls (AOAI 400)**
+- Owner: **squad:lambert** (LLM/agent integration)
+- Priority: **p0** — permanently wedges hosted demo for all users until container restart
+- Release: **v0.4.0** (patch, urgent)
+- Root cause: `FoundryAgent.chat()` (`src/deepseismic/agent/agent.py` ~L402/437) writes assistant `tool_calls` to persistent thread history before matching tool-result messages. `GeneratorExit` from the 25s UI truncation guard (`gradio_app.py` L318-323) leaves the thread in an irrecoverable corrupt state. Process-wide singleton means all sessions on the container are poisoned.
+
+**Issue #26 — Run prefix-resolution 404 on ADLS/HNS**
+- Owner: **squad:parker** (backend/API + storage client)
+- Priority: **p1** — clean workaround exists (full UUID); no data loss
+- Release: **v0.5.0**
+- Root cause: `_resolve_run_id()` (`src/deepseismic/api/routes/interpretation.py` L48-105) uses `ContainerClient.list_blobs(name_starts_with=...)` which silently returns nothing on ADLS Gen2 HNS containers. Bare `except Exception: pass` at L84 swallows the failure. Fix: use DataLake `FileSystemClient.get_paths()` or a written index manifest; replace bare except with logged error.
+
+### Sequencing
+#25 must land before #26 given severity. Both are independent bugs with no shared code surface.
+
+### Architectural note (general)
+**Agent thread-state must be committed atomically.** The assistant message with `tool_calls` and all matching tool-result messages must be appended to thread history in a single atomic operation. Writing the assistant entry first and the tool results second creates a window where a generator interruption (timeout, exception, `GeneratorExit`) produces unrecoverable corrupt state. This principle applies to any agent that reuses a persistent conversation thread across requests.
+

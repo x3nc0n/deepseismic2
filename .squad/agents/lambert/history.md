@@ -70,3 +70,5 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 **Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
 
+
+- **2026-06-29 (Ripley triage — issue #25):** Assigned to Lambert — chat wedges after truncated tool turn (AOAI 400). p0 blocker for hosted demo. Thread-state atomicity required in FoundryAgent.chat().

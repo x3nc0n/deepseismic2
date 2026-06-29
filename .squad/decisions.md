@@ -2,6 +2,87 @@
 
 ## Active Decisions
 
+# Triage Decision — Issues #25 and #26
+
+**Date:** 2026-06-29T17:46:41-05:00  
+**Author:** Ripley (Lead)
+
+---
+
+## Issue #25 — Chat wedges after truncated tool turn (AOAI 400)
+
+**Title:** "Chat wedges after a truncated tool turn: dangling tool_calls corrupts shared thread (AOAI 400) + 25s truncation"
+
+| Field | Value |
+|-------|-------|
+| Owner | squad:lambert |
+| Type | type:bug |
+| Priority | priority:p0 |
+| Release | release:v0.4.0 |
+
+### Root cause summary
+
+Two bugs, one blocker:
+
+**Bug B (blocker):** `FoundryAgent.chat()` (`src/deepseismic/agent/agent.py` ~L402/437) appends the assistant message WITH `tool_calls` to the persistent thread history before the matching tool-result messages are committed. When the UI's 25s guard (`gradio_app.py` L318-323) fires `GeneratorExit`, the thread is left with an unmatched `tool_calls` entry. Because the thread is reused per session and the UI agent is a process-wide singleton, every subsequent request from any user on the container replays the corrupt history → AOAI 400. Container restart is the only recovery path.
+
+**Bug A (contributing):** The 25s wall-clock guard abandons the generator mid-round because the agent makes blocking (non-streaming) completion calls. Fix requires real streaming and/or turn-boundary-aware truncation.
+
+### Ownership rationale
+
+Thread-state management and streaming completion are LLM integration code owned by Lambert. Bug A's truncation guard is UI-side (Parker territory) but the real fix — streaming — lives in the agent. Lambert leads; Lambert/Parker coordinate on the UI guard cleanup.
+
+### Priority rationale
+
+p0: the bug permanently wedges the hosted demo for all users until an operator manually restarts the container. No user-facing workaround exists.
+
+---
+
+## Issue #26 — Run lookup by short id-prefix 404s on ADLS/HNS
+
+**Title:** "Run lookup by short id-prefix 404s: _resolve_run_id catalog list-scan fails on ADLS/HNS (full UUID works)"
+
+| Field | Value |
+|-------|-------|
+| Owner | squad:parker |
+| Type | type:bug |
+| Priority | priority:p1 |
+| Release | release:v0.5.0 |
+
+### Root cause summary
+
+`_resolve_run_id()` (`src/deepseismic/api/routes/interpretation.py` L48-105) uses `ContainerClient.list_blobs(name_starts_with=...)` for prefix resolution against the ADLS Gen2 / hierarchical-namespace `catalog` container. This API returns nothing (or raises) on HNS containers where flat-blob enumeration is not available. A bare `except Exception: pass` at L84 silently swallows the failure, making the scan appear to return zero matches rather than surfacing an error. The caller sees a 404 even though the run persisted correctly.
+
+Exact `download_blob` (used when a full UUID is supplied) works correctly.
+
+### Ownership rationale
+
+Pure backend/API + Azure storage-client bug. No ML or LLM surface. Parker owns.
+
+### Priority rationale
+
+p1: a clean workaround exists (supply the full UUID). No data loss. The run is intact; only the short-prefix UX is broken. Independent of #25 — no shared code surface.
+
+### Suggested fix path
+
+1. Replace `list_blobs` with `DataLake FileSystemClient.get_paths(path="catalog/interpretation/", recursive=False)` — the same client the ADLS browser uses, OR  
+2. Write a `catalog/interpretation/index.json` manifest atomically at submit time; prefix scan reads the index instead of enumerating blobs.
+
+Either way: replace the bare `except Exception: pass` at L84 with a logged error so future failures surface diagnostically.
+
+---
+
+## Sequencing
+
+**#25 must land before #26.** #25 is a p0 that blocks all users; #26 is a p1 with a workaround. Both are independent bugs with no shared code surface.
+
+---
+
+## Architectural note (general, team-wide)
+
+**Agent thread-state must be committed atomically.** The assistant `tool_calls` message and all matching tool-result messages must be appended to thread history in a single atomic write. Writing the assistant entry first creates a window where any interruption (`GeneratorExit`, timeout, exception) produces permanently corrupt thread state. This principle applies to any component that reuses a persistent conversation thread across requests.
+
+---
 
 # Decision Note: S2-06 — Seismic Conditioning / QC Pipeline
 

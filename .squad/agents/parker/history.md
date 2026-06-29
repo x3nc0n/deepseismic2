@@ -125,3 +125,5 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 **Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
 
+
+- **2026-06-29 (Ripley triage — issue #26):** Assigned to Parker — run lookup by short id-prefix 404s on ADLS/HNS. p1 with workaround. Prefix resolution bug in _resolve_run_id().

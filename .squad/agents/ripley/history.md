@@ -231,3 +231,20 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 ### Architectural note (general)
 **Agent thread-state must be committed atomically.** The assistant message with `tool_calls` and all matching tool-result messages must be appended to thread history in a single atomic operation. Writing the assistant entry first and the tool results second creates a window where a generator interruption (timeout, exception, `GeneratorExit`) produces unrecoverable corrupt state. This principle applies to any agent that reuses a persistent conversation thread across requests.
 
+## Team Coordination — 2026-06-29T23:44:49Z: Both PRs Ready for Review
+
+**Status Update:**
+- **#25 (lambert):** PR #27 open (`squad/25-chat-wedge-tool-calls`) — 6 new tests, atomic round_buffer + try/finally seal + self-heal layer verified
+- **#26 (parker):** PR #28 open (`squad/26-resolve-run-id-prefix`) — 12 new tests, catalog index + pending manifest + logged warnings implemented
+
+**Both agents delivered early.** No blockers. Sequencing: review #25 first (p0), then #26 (p1). Independent code paths — parallel review safe.
+
+**Scribe actions completed:**
+- Archived 2026-06-24 entries (50+ decisions) to decisions-archive.md
+- Merged inbox files to active decisions
+- Orchestration logs written (ISO 8601 UTC)
+- Session log recorded
+- Cross-agent history updated
+
+**Next step:** Team review of PRs #27 and #28. Once both are merged, v0.4.0 patch is ready.
+

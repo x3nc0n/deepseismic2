@@ -72,3 +72,17 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 
 - **2026-06-29 (Ripley triage — issue #25):** Assigned to Lambert — chat wedges after truncated tool turn (AOAI 400). p0 blocker for hosted demo. Thread-state atomicity required in FoundryAgent.chat().
+
+- **2026-06-29 (issue #25 — atomic thread-history commit, PR #27):**
+  - **Root cause (Bug B):** `FoundryAgent.chat()` (`src/deepseismic/agent/agent.py` ~L402) appended the assistant `tool_calls` message to the persistent `history` list before the matching `tool` result messages were appended. Generator `yield`s inside the tool-dispatch loop meant that the UI's 25s `break` sent `GeneratorExit` mid-round, leaving a dangling `tool_calls` entry with no tool response — every subsequent AOAI call on that process got HTTP 400. Container restart was the only recovery path.
+  - **Root cause (Bug A):** `gradio_app.py` 25s guard could break mid-tool-round, cutting off tool-trace output to the user.
+  - **Fix (Bug B — belt-and-suspenders):**
+    1. **Atomic `round_buffer`:** Stage assistant msg + all tool results in a local list; `history.extend(round_buffer)` only after the round is complete (`src/deepseismic/agent/agent.py`, `FoundryAgent.chat()`).
+    2. **`try/finally` seal:** Synthesize `{"error": "interrupted"}` tool responses for any unanswered `tool_call_id`s before committing — handles `GeneratorExit` at any yield point.
+    3. **`_seal_dangling_tool_calls()` on entry:** Self-heals any pre-existing corrupt thread at the start of every `chat()` call.
+  - **Fix (Bug A):** Track `in_tool_round` via the `\n> 🔧` chunk prefix; defer `break` until `not in_tool_round`.
+  - **Key file paths:** `src/deepseismic/agent/agent.py` (lines ~360-447), `src/deepseismic/ui/gradio_app.py` (lines ~316-335), `src/tests/test_agent_atomic_commit.py` (new, 6 tests).
+  - **Important implementation note:** `_get_history()` returns the mutable list stored in `self._threads` (via `setdefault`). `history.extend(round_buffer)` mutates the list in-place — do NOT rebind the local variable.
+  - **Tests:** 6 new focused tests in `test_agent_atomic_commit.py`; all 48 targeted agent/chat/thread tests pass; ruff clean; py_compile clean.
+  - **Follow-up:** Migrate `FoundryAgent.chat()` to `stream=True` (chunked SSE) to eliminate the truncation risk entirely and remove the round-buffer workaround.
+

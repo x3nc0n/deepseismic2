@@ -32,3 +32,7 @@
 - **Reference:** microsoft/seismic-deeplearning (UNet, SEResNet, HRNet for seismic interpretation)
 - **User:** jospaid
 - **Created:** 2026-06-10
+
+## ⚠️ Repo Boundary — Application Code Only
+
+This is the **application code repo**. Squad and every agent here **never alter or write to deployed Azure infrastructure** — no `az create/update/delete`, no Bicep/Terraform apply, no live resource or config mutation. Read-only inspection of the deployed app (AZ CLI logs/status/resource & storage state) is allowed for diagnosis and verification. **Infrastructure is owned and deployed by the separate `deepseismic2-infra` repo, which has its own Squad.** If a change requires deployed-infra modification, file/coordinate it for the infra repo's Squad rather than doing it here.

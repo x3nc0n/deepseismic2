@@ -315,12 +315,30 @@ def _chat(
 
         chunks: list[str] = []
         start = _time.monotonic()
+        timed_out = False
+        in_tool_round = False
         for chunk in agent.chat(message):
+            # Track whether we are mid-tool-dispatch (chunks start with "\n> 🔧").
+            # Only allow the timeout break BETWEEN completed rounds to avoid
+            # severing a tool round mid-call (UX improvement; history integrity
+            # is guaranteed by the atomic-commit fix in FoundryAgent.chat).
+            if chunk.startswith("\n> 🔧"):
+                in_tool_round = True
+            elif in_tool_round:
+                # First non-tool chunk after tool traces: round boundary reached.
+                in_tool_round = False
+
             chunks.append(chunk)
+
             # Guard against exceeding AFD idle timeout (30s default)
             if _time.monotonic() - start > 25:
-                chunks.append("\n\n⏱️ _Response truncated — processing took too long._")
+                timed_out = True
+
+            if timed_out and not in_tool_round:
                 break
+
+        if timed_out:
+            chunks.append("\n\n⏱️ _Response truncated — processing took too long._")
         response = "".join(chunks)
 
     except Exception as exc:

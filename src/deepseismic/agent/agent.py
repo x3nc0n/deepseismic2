@@ -361,6 +361,40 @@ class FoundryAgent:
     def _yield_text_chunks(text: str) -> Generator[str, None, None]:
         yield from text.splitlines(keepends=True)
 
+    def _seal_dangling_tool_calls(self, history: list[dict[str, Any]]) -> None:
+        """Synthesize tool responses for any trailing assistant tool_calls without matches.
+
+        Self-heals pre-existing corrupt thread state so the next API call doesn't
+        receive an invalid message sequence.
+        """
+        for i in range(len(history) - 1, -1, -1):
+            msg = history[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                answered_ids = {
+                    m["tool_call_id"]
+                    for m in history[i + 1 :]
+                    if m.get("role") == "tool" and "tool_call_id" in m
+                }
+                missing = [
+                    tc["id"]
+                    for tc in msg["tool_calls"]
+                    if tc["id"] not in answered_ids
+                ]
+                if missing:
+                    logger.warning(
+                        "Sealing %d dangling tool_call(s) in thread history",
+                        len(missing),
+                    )
+                    for tc_id in missing:
+                        history.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": json.dumps({"error": "interrupted"}),
+                            }
+                        )
+                break  # only the last assistant message matters
+
     def create_thread(self) -> str:
         """Create a new in-memory conversation thread and return its ID."""
         thread_id = uuid4().hex
@@ -381,6 +415,10 @@ class FoundryAgent:
             state.thread_id = thread_id
 
         history = self._get_history(thread_id)
+
+        # Safety net: seal any dangling tool_calls left by a previously interrupted round
+        self._seal_dangling_tool_calls(history)
+
         history.append({"role": "user", "content": message})
 
         for _ in range(16):
@@ -399,48 +437,75 @@ class FoundryAgent:
                 self._serialize_tool_call(tool_call)
                 for tool_call in tool_calls
             ]
-            history.append(
+
+            # Stage the assistant message in a local round buffer.
+            # It is NOT written to persistent history until the full round is complete,
+            # so a GeneratorExit mid-round never leaves a dangling tool_calls entry.
+            round_buffer: list[dict[str, Any]] = [
                 {
                     "role": "assistant",
                     "content": assistant_content,
                     **({"tool_calls": serialized_tool_calls} if serialized_tool_calls else {}),
                 }
-            )
+            ]
 
             if assistant_content:
                 yield from self._yield_text_chunks(assistant_content)
 
             if not tool_calls:
+                # No tool calls — commit the single assistant message and finish.
+                history.extend(round_buffer)
                 return
 
-            for tool_call in tool_calls:
-                tool_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments or "{}")
-                    if not isinstance(args, dict):
-                        raise TypeError("Tool arguments must decode to a JSON object")
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("Invalid tool arguments for %s", tool_name)
-                    yield f"\n> 🔧 `{tool_name}(<invalid arguments>)`\n"
-                    args = {}
-                    result = {"error": f"Invalid tool arguments: {exc}"}
-                else:
-                    args_display = ", ".join(f"{k}={v!r}" for k, v in args.items())
-                    yield f"\n> 🔧 `{tool_name}({args_display})`\n"
-                    result = _dispatch_tool_call(tool_name, args)
+            # Dispatch tool calls, accumulating results into round_buffer.
+            # try/finally guarantees that every tool_call_id in the staged assistant
+            # message gets a matching tool response before round_buffer is committed,
+            # even if GeneratorExit is raised at one of the yield statements below.
+            answered_ids: set[str] = set()
+            try:
+                for tool_call in tool_calls:
+                    tool_name = tool_call.function.name
+                    try:
+                        args = json.loads(tool_call.function.arguments or "{}")
+                        if not isinstance(args, dict):
+                            raise TypeError("Tool arguments must decode to a JSON object")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("Invalid tool arguments for %s", tool_name)
+                        yield f"\n> 🔧 `{tool_name}(<invalid arguments>)`\n"
+                        args = {}
+                        result: Any = {"error": f"Invalid tool arguments: {exc}"}
+                    else:
+                        args_display = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                        yield f"\n> 🔧 `{tool_name}({args_display})`\n"
+                        result = _dispatch_tool_call(tool_name, args)
 
-                if state is not None:
-                    state.tool_call_log.append(
-                        {"tool": tool_name, "args": args, "result": result}
+                    if state is not None:
+                        state.tool_call_log.append(
+                            {"tool": tool_name, "args": args, "result": result}
+                        )
+
+                    round_buffer.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(result),
+                        }
                     )
-
-                history.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(result),
-                    }
-                )
+                    answered_ids.add(tool_call.id)
+            finally:
+                # Synthesize error responses for any tool calls not yet answered
+                # (handles GeneratorExit or other exceptions mid-loop).
+                for tc in tool_calls:
+                    if tc.id not in answered_ids:
+                        round_buffer.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": json.dumps({"error": "interrupted"}),
+                            }
+                        )
+                # Atomically commit the complete, contract-valid round to history.
+                history.extend(round_buffer)
 
         logger.error("Model exceeded tool-call limit for thread %s", thread_id)
         yield "\n⚠️ Assistant stopped after too many tool calls.\n"

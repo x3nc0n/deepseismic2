@@ -45,6 +45,41 @@ router = APIRouter(prefix="/interpretation", tags=["interpretation"])
 _interp_jobs: dict[str, dict[str, Any]] = {}
 
 
+_CATALOG_INDEX_BLOB = "interpretation/index.json"
+
+
+def _catalog_index_append(run_id: str, storage: Any) -> None:
+    """Read-modify-write ``catalog/interpretation/index.json`` to record *run_id*.
+
+    Tolerates a missing index (first run ever) and any storage error — the
+    index is a best-effort acceleration structure; a write failure must never
+    block job submission.
+    """
+    try:
+        try:
+            raw = storage.download_blob("catalog", _CATALOG_INDEX_BLOB)
+            ids: list[str] = json.loads(raw)
+            if not isinstance(ids, list):
+                ids = []
+        except FileNotFoundError:
+            ids = []
+
+        if run_id not in ids:
+            ids.append(run_id)
+            storage.upload_blob(
+                "catalog",
+                _CATALOG_INDEX_BLOB,
+                json.dumps(ids).encode(),
+            )
+    except Exception:
+        logger.warning(
+            "catalog index write failed for run_id=%s — prefix resolution may fall back"
+            " to list_blobs",
+            run_id,
+            exc_info=True,
+        )
+
+
 def _resolve_run_id(run_id: str, storage: Any) -> str:
     """Resolve a possibly-abbreviated ``run_id`` to a full run identifier.
 
@@ -55,7 +90,8 @@ def _resolve_run_id(run_id: str, storage: Any) -> str:
 
     1. an exact in-memory job key,
     2. an exact persisted ``catalog`` manifest,
-    3. a unique prefix match across in-memory jobs **and** catalog manifests.
+    3. a unique prefix match across in-memory jobs, the catalog index.json,
+       and (as a fallback) a ``list_blobs`` scan.
 
     Returns the input unchanged if it already resolves exactly.  Raises 404 if
     nothing matches and 409 if a prefix is ambiguous (>1 match).
@@ -73,16 +109,40 @@ def _resolve_run_id(run_id: str, storage: Any) -> str:
     except Exception:  # noqa: BLE001 — fall through to prefix search
         pass
 
-    # 3. Unique prefix match across in-memory jobs + catalog manifests.
+    # 3. Unique prefix match across in-memory jobs + catalog index + list_blobs fallback.
     matches: set[str] = {rid for rid in _interp_jobs if rid.startswith(run_id)}
+
+    # 3a. Primary: scan the deterministic catalog index (HNS-safe exact download).
     try:
-        for name in storage.list_blobs("catalog", "interpretation/"):
-            # name == "interpretation/{full_run_id}/status.json"
-            parts = name.split("/")
-            if len(parts) >= 2 and parts[1].startswith(run_id):
-                matches.add(parts[1])
-    except Exception:  # noqa: BLE001 — catalog listing is best-effort
-        pass
+        raw = storage.download_blob("catalog", _CATALOG_INDEX_BLOB)
+        all_ids: list[str] = json.loads(raw)
+        for rid in all_ids:
+            if rid.startswith(run_id):
+                matches.add(rid)
+    except FileNotFoundError:
+        pass  # no index yet — fall through to list_blobs
+    except Exception:
+        logger.warning(
+            "catalog index read failed during _resolve_run_id(%s) — falling back to list_blobs",
+            run_id,
+            exc_info=True,
+        )
+
+    # 3b. Fallback: enumerate blobs (may fail on ADLS/HNS — logged, not silenced).
+    if not matches:
+        try:
+            for name in storage.list_blobs("catalog", "interpretation/"):
+                # name == "interpretation/{full_run_id}/status.json"
+                parts = name.split("/")
+                if len(parts) >= 2 and parts[1].startswith(run_id):
+                    matches.add(parts[1])
+        except Exception:
+            logger.warning(
+                "list_blobs('catalog', 'interpretation/') failed during _resolve_run_id(%s) "
+                "— on ADLS/HNS this is expected; ensure catalog index.json is up to date",
+                run_id,
+                exc_info=True,
+            )
 
     if len(matches) == 1:
         return next(iter(matches))
@@ -332,6 +392,31 @@ def run_fault_detection(
         _interp_jobs[run_id]["fault_voxel_fraction"] = 0.0412
         logger.info("Mock fault detection for survey=%s run_id=%s", req.survey_id, run_id)
     else:
+        # Write a durable pending manifest BEFORE the background task starts so
+        # the run is resolvable by full id cross-replica immediately (not only
+        # after completion).  Also append to the catalog index for prefix lookups.
+        pending_manifest = {
+            "run_id": run_id,
+            "survey_id": req.survey_id,
+            "status": "pending",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+        try:
+            storage.upload_blob(
+                "catalog",
+                f"interpretation/{run_id}/status.json",
+                json.dumps(pending_manifest).encode(),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to write pending manifest for run_id=%s — run may not be resolvable "
+                "cross-replica until completion",
+                run_id,
+                exc_info=True,
+            )
+        _catalog_index_append(run_id, storage)
+
         background_tasks.add_task(_run_fault_detection, run_id, req, storage)
         logger.info("Fault detection queued: run_id=%s survey=%s", run_id, req.survey_id)
 

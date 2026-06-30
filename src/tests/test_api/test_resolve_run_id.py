@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import uuid
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,7 +28,6 @@ from deepseismic.api.routes.interpretation import (
     _resolve_run_id,
 )
 
-
 # ---------------------------------------------------------------------------
 # Minimal in-memory storage that supports exact download + configurable list
 # ---------------------------------------------------------------------------
@@ -38,7 +36,9 @@ from deepseismic.api.routes.interpretation import (
 class _IndexStorageClient:
     """Storage client that serves blobs from a dict and makes list_blobs controllable."""
 
-    def __init__(self, *, list_blobs_raises: bool = False, list_blobs_returns: list[str] | None = None) -> None:
+    def __init__(
+        self, *, list_blobs_raises: bool = False, list_blobs_returns: list[str] | None = None
+    ) -> None:
         self._store: dict[str, dict[str, bytes]] = {}
         self._list_blobs_raises = list_blobs_raises
         self._list_blobs_returns = list_blobs_returns  # overrides normal listing when set
@@ -215,21 +215,10 @@ class TestPendingManifestAtSubmit:
         _patch_real_mode(monkeypatch, storage)
 
         # Intercept background_tasks to confirm no task has run yet when we check
-        from deepseismic.api.routes import interpretation as interp_mod
-
-        submitted_run_id: list[str] = []
-
-        original_add_task = None
-
-        def _fake_add_task(fn: Any, *args: Any, **kwargs: Any) -> None:
-            # Record the run_id but DON'T actually run the task
-            submitted_run_id.append(args[0])
-
         with TestClient(app) as client:
             # Monkeypatch BackgroundTasks.add_task on the request level via the router
             # We use the TestClient but intercept the background task
             import deepseismic.api.routes.interpretation as _i_mod
-            original_run = _i_mod._run_fault_detection
 
             called = []
 

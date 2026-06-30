@@ -125,3 +125,30 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 **Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
 
+
+- **2026-06-29 (Ripley triage — issue #26):** Assigned to Parker — run lookup by short id-prefix 404s on ADLS/HNS. p1 with workaround. Prefix resolution bug in _resolve_run_id().
+
+## Learnings — 2026-06-29 — Issue #26: HNS list_blobs fragility + catalog index pattern
+
+### Root cause
+`_resolve_run_id()` step 3 used `list_blobs('catalog', 'interpretation/')` to enumerate blobs for prefix matching. On ADLS Gen2 HNS containers, `ContainerClient.list_blobs(name_starts_with=...)` returns nothing or raises. A bare `except Exception: pass` silently swallowed the error → 404 on valid prefix even though the run existed.
+
+### Fix pattern: catalog index.json + pending manifest
+
+**`catalog/interpretation/index.json`** — a JSON list of all full run ids. Maintained by `_catalog_index_append()` (read-modify-write at submit time). `_resolve_run_id` step 3 now reads the index via `download_blob` (exact, HNS-safe) before falling back to `list_blobs`. `list_blobs` kept as fallback for pre-index runs, but now logs a WARNING.
+
+**Pending `status.json` manifest** written in `run_fault_detection` BEFORE the background task fires so the full id is durably resolvable cross-replica immediately after submission.
+
+### Key file/line locations
+- `src/deepseismic/api/routes/interpretation.py`
+  - `_CATALOG_INDEX_BLOB` constant (module level)
+  - `_catalog_index_append()` — read-modify-write index helper
+  - `_resolve_run_id()` — step 3a (index scan), 3b (list_blobs fallback with WARNING)
+  - `run_fault_detection()` — pending manifest write + index append (before `background_tasks.add_task`)
+- `src/tests/test_api/test_resolve_run_id.py` — 12 focused tests for this fix
+
+### Design notes
+- Index is append-only, best-effort — a write failure logs a warning but never blocks job submission.
+- `list_blobs` fallback is only attempted when index scan yields no matches — avoids HNS errors on the hot path.
+- Pending manifest at submit means step 2 (exact download) also works for the full id immediately — redundant with the index but provides defense-in-depth across replicas.
+- PR: https://github.com/x3nc0n/deepseismic2/pull/28

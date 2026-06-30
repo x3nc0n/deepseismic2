@@ -8,6 +8,14 @@
 - **Opportunity areas:** Geological report generation, well log interpretation assist, seismic attribute explanation, interactive Q&A over survey data
 - **User:** jospaid
 
+## Recent Sessions
+
+### 2026-06-29 — v0.6.5 Release (Issue #25 fix — atomic commit)
+- PR #27 merged: Fixed FoundryAgent.chat() thread-state corruption (p0 blocker)
+- Implemented atomic round_buffer + try/finally commit + _seal_dangling_tool_calls() self-heal
+- All 6 contract tests passing; shipped in v0.6.5
+- Infra deploy-notification: Spava-Corp/deepseismic2-infra#21
+
 ## Learnings
 
 - **2026-06-25 (Sprint 3 — issue #9 — de-mock the Foundry agent):**

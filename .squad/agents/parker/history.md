@@ -8,6 +8,15 @@
 - **Challenge:** Seismic data is large (GB-TB), traditionally needs fast random I/O — find cheaper alternatives
 - **User:** jospaid
 
+## Recent Sessions
+
+### 2026-06-29 — v0.6.5 Release (Issue #26 fix — HNS-safe prefix lookup)
+- PR #28 merged: Fixed _resolve_run_id() 404 on ADLS/HNS containers (p1 workaround available)
+- Implemented catalog index.json (exact download, HNS-safe) + pending manifest at submit
+- Replaced bare except with logged WARNING for diagnostics
+- All 12 focused tests passing; shipped in v0.6.5
+- Infra deploy-notification: Spava-Corp/deepseismic2-infra#21
+
 ## Learnings
 
 ### 2026-06-09 — Local dev environment and storage abstraction layer

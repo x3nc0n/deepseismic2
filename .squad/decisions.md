@@ -2,6 +2,86 @@
 
 ## Active Decisions
 
+# Decision: Release Workflow Rule (v0.6.5 Release)
+
+**Date:** 2026-06-29T20:00:00-05:00
+**Author:** Coordinator (Ripley + team)
+**Status:** Established
+
+## Workflow: Fix Issue → Cut Versioned Release → Open Notify Issue on Infra
+
+When critical bug fixes (issues #25, #26) are merged to `main`:
+
+1. **Fix issue** — PR lands, all tests pass, main is green
+2. **Cut versioned release** — Bump `pyproject.toml` version, create GitHub release tag (e.g., v0.6.5), push both to `main`
+3. **Open deploy-notification issue** — File an issue on the **Infra Repo** (Spava-Corp/deepseismic2-infra) noting the release version and which app issues were fixed
+
+This ensures the infrastructure team has explicit notification that a new app version is available and knows which bugs were addressed.
+
+### v0.6.5 Release (2026-06-29)
+
+- Shipped fixes for issues #25 (atomic thread-history commit) and #26 (HNS-safe prefix resolution)
+- Bumped version from 0.6.4 to 0.6.5
+- Opened infra deploy-notification issue: Spava-Corp/deepseismic2-infra#21
+
+---
+
+# Directive: Application Repo Never Writes to Deployed Infrastructure
+
+**Date:** 2026-06-29  
+**Author:** jospaid (via Copilot/Squad)  
+**Category:** Governance
+
+This repository (deepseismic2) is the **application code repo**. Squad and all its agents (Ripley, Parker, Lambert, Dallas, Hudson, SMEs) MUST NOT alter, provision, modify, or write to the **deployed Azure infrastructure** in any way. Infrastructure is owned and deployed by the separate **Infra Repo** (deepseismic2-infra), which has its own Squad. Parker (Backend/Infra) here means application-backend + app-level storage/code concerns ONLY — not cloud resource provisioning.
+
+**Allowed:** Read-only inspection of the deployed app/environment using AZ CLI or other tools (e.g., reading logs, app status, resource state, storage contents) for diagnosis and verification.
+
+**Not allowed:** `az` create/update/delete, Bicep/Terraform apply, resource mutation, or config writes to live infra.
+
+If a fix genuinely requires an infrastructure change, this repo's Squad files/coordinates an issue for the **Infra Repo's** Squad rather than making the change here.
+
+**Why:** Clean separation of concerns between the app repo and the infra repo. The infra repo is the single source of truth for deployed cloud resources; the app repo must never create drift by mutating live infrastructure. Reinforced by issue #26 triage (an app-side bug explicitly NOT requiring any infra/replica/storage-resource change).
+
+---
+
+# Decision: Fix pytest collection error — scripts/ not importable in CI
+
+**Date:** 2026-06-29  
+**Author:** Hudson (Tester/QA)  
+**PR:** #29  
+**Status:** Resolved
+
+## Problem
+
+CI was completely red on `main` and both open PRs (#27, #28). The root cause was a pytest **collection error** (not a test failure) in `src/tests/test_ingest/test_f3_ingest.py`:
+
+```
+ERROR collecting src/tests/test_ingest/test_f3_ingest.py
+src/tests/test_ingest/test_f3_ingest.py:24: from scripts.download_f3 import (...)
+E   ModuleNotFoundError: No module named 'scripts'
+```
+
+The test was added in issue #24. It imports `scripts.download_f3` (repo root `scripts/download_f3.py`) after a `pytest.importorskip("segyio")` guard. Once `segyio` was installed in the CI environment, the guard passed and the import was attempted. However, `scripts/` was not importable because pytest `pythonpath` only included `["src"]`, not the repo root.
+
+**Key insight:** A single collection error kills the entire pytest run. The `importorskip` guard cannot rescue a `ModuleNotFoundError` on the module-level import — pytest raises the collection error before it can evaluate the guard.
+
+## Decision
+
+Add `"."` to `pythonpath` in `pyproject.toml` and add `scripts/__init__.py`. This is the smallest correct fix: two lines changed, no behavior change for existing tests, no refactoring.
+
+## Changes
+
+- `pyproject.toml`: `pythonpath = ["src"]` → `pythonpath = [".", "src"]`
+- `scripts/__init__.py`: new file with docstring
+
+## Validation
+
+- `pytest -m "not integration" -q` → 343 passed, 2 skipped, 9 deselected, **no collection errors**
+- `pytest src/tests/test_ingest/test_f3_ingest.py -q` → 6 passed
+- `ruff check` → All checks passed
+
+---
+
 # Triage Decision — Issues #25 and #26
 
 **Date:** 2026-06-29T17:46:41-05:00  

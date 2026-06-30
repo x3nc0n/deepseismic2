@@ -9,6 +9,14 @@
 - **Reference:** microsoft/seismic-deeplearning repo (UNet, SEResNet, HRNet segmentation on seismic data)
 - **User:** jospaid
 
+## Recent Sessions
+
+### 2026-06-29 — v0.6.5 Release Pipeline (fixes #25/#26)
+- Coordinated release: PRs #27 (Lambert, atomic commit), #28 (Parker, HNS-safe lookup), #29 (Hudson, CI fix)
+- Bumped version 0.6.4 → 0.6.5, created GitHub release tag
+- Filed infra deploy-notification issue Spava-Corp/deepseismic2-infra#21
+- Established workflow: fix → release → infra notify
+
 ## Learnings
 
 ### Sprint 1 → Sprint 2: FastAPI backend implementation (2026-06-09)

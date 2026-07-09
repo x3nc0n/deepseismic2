@@ -17,86 +17,96 @@
 - Filed infra deploy-notification issue Spava-Corp/deepseismic2-infra#21
 - Established workflow: fix → release → infra notify
 
-## Learnings
+## Learnings — 2026-06-29T17:46:41-05:00: Issue Triage #25 and #26
+
+### Triage decisions
+
+**Issue #25 — Chat wedges on dangling tool_calls (AOAI 400)**
+- Owner: **squad:lambert** (LLM/agent integration)
+- Priority: **p0** — permanently wedges hosted demo for all users until container restart
+- Release: **v0.4.0** (patch, urgent)
+- Root cause: `FoundryAgent.chat()` (`src/deepseismic/agent/agent.py` ~L402/437) writes assistant `tool_calls` to persistent thread history before matching tool-result messages. `GeneratorExit` from the 25s UI truncation guard (`gradio_app.py` L318-323) leaves the thread in an irrecoverable corrupt state. Process-wide singleton means all sessions on the container are poisoned.
+
+**Issue #26 — Run prefix-resolution 404 on ADLS/HNS**
+- Owner: **squad:parker** (backend/API + storage client)
+- Priority: **p1** — clean workaround exists (full UUID); no data loss
+- Release: **v0.5.0**
+- Root cause: `_resolve_run_id()` (`src/deepseismic/api/routes/interpretation.py` L48-105) uses `ContainerClient.list_blobs(name_starts_with=...)` which silently returns nothing on ADLS Gen2 HNS containers. Bare `except Exception: pass` at L84 swallows the failure. Fix: use DataLake `FileSystemClient.get_paths()` or a written index manifest; replace bare except with logged error.
+
+### Sequencing
+#25 must land before #26 given severity. Both are independent bugs with no shared code surface.
+
+### Architectural note (general)
+**Agent thread-state must be committed atomically.** The assistant message with `tool_calls` and all matching tool-result messages must be appended to thread history in a single atomic operation. Writing the assistant entry first and the tool results second creates a window where a generator interruption (timeout, exception, `GeneratorExit`) produces unrecoverable corrupt state. This principle applies to any agent that reuses a persistent conversation thread across requests.
+
+## Team Coordination — 2026-06-29T23:44:49Z: Both PRs Ready for Review
+
+**Status Update:**
+- **#25 (lambert):** PR #27 open (`squad/25-chat-wedge-tool-calls`) — 6 new tests, atomic round_buffer + try/finally seal + self-heal layer verified
+- **#26 (parker):** PR #28 open (`squad/26-resolve-run-id-prefix`) — 12 new tests, catalog index + pending manifest + logged warnings implemented
+
+**Both agents delivered early.** No blockers. Sequencing: review #25 first (p0), then #26 (p1). Independent code paths — parallel review safe.
+
+**Scribe actions completed:**
+- Archived 2026-06-24 entries (50+ decisions) to decisions-archive.md
+- Merged inbox files to active decisions
+- Orchestration logs written (ISO 8601 UTC)
+- Session log recorded
+- Cross-agent history updated
+
+**Next step:** Team review of PRs #27 and #28. Once both are merged, v0.4.0 patch is ready.
+
+## Scribe Cross-Agent Update — 2026-07-09T22:43:22Z
+
+**F3 Training Data: External Sourcing Required**
+
+Cross-survey training blocked until F3 data is externally sourced. Issue #31 investigation confirms: real F3 data NOT present in repo (only synthetic proxy). Must ingest from public **OpendTect F3 Demo** (dGB Earth Sciences / TerraNubis, CC BY-SA). Existing `scripts/download_f3.py` documents the acquisition contract. Use `parse_opendtect_fault_sticks` parser (not Petrel).
+
+**Leakage Gate (Hard Rule):** F3 = training input only; Volve = scoring/evaluation target only (issue #24). No cross-survey contamination.
+
+**Geometry:** IL 100–750, XL 300–1250, ~462 samples @ 4ms.
+
+**T4 Compute:** GPU workload profile provisioned (Spava-Corp/deepseismic2-infra#23). Data staging must complete before T4 training run.
+
+**Decision:** `.squad/decisions.md` — F3 Ingest Contract (approved/in-progress).
+
+---
+
+## Archive
 
 ### Sprint 1 → Sprint 2: FastAPI backend implementation (2026-06-09)
 
 **What was built:**
-- `api/main.py` — full app factory with lifespan, CORS (Streamlit 8501, Gradio 7860), health check
-- `api/schemas.py` — complete Pydantic v2 models: SurveyMetadata, IngestRequest/Response,
-  InlineSlice, CrosslineSlice, InterpretationRequest/Status/Result, FaultOverlay,
-  WellMetadata, WellLog, FormationTop, ErrorResponse
-- `api/dependencies.py` — `get_storage_client`, `get_settings_dep`, `is_mock_mode()`,
-  `StorageClientDep` / `SettingsDep` annotated type aliases
-- `api/routes/surveys.py` — 5 endpoints: list, metadata, ingest (BackgroundTasks),
-  inline slice, crossline slice; full mock data with Volve ST10010 geometry
-- `api/routes/interpretation.py` — 4 endpoints: fault-detection (BackgroundTasks),
-  status, results, overlay; mock data with realistic fault probability patterns
-- `api/routes/wells.py` — 3 endpoints: list, metadata, logs; mock data for
-  Volve wells 15/9-F-11B and 15/9-F-1C with formation tops and GR/DT/RHOB log curves
+- `api/main.py` — full app factory with lifespan, CORS, health check
+- `api/schemas.py` — complete Pydantic v2 models
+- `api/dependencies.py` — `get_storage_client`, `get_settings_dep`, `is_mock_mode()`
+- `api/routes/surveys.py` — 5 endpoints: list, metadata, ingest, inline/crossline slices
+- `api/routes/interpretation.py` — 4 endpoints: fault-detection, status, results, overlay
+- `api/routes/wells.py` — 3 endpoints: list, metadata, logs with Volve mock data
 
-**Design decisions made:**
-- `DEEPSEISMIC_MOCK_MODE=true` env var gates all mock behaviour — enables Foundry agent
-  tools to call real endpoints without real storage
-- BackgroundTasks (single-process) is the job runner for PoC; module-level dicts store
-  run state (survives in-process but not across restarts)
-- Inline/crossline slices cap at 50 traces × 100 samples in mock mode (manageable JSON)
-- Real mode reads Zarr directly from blob storage via `open_zarr_store`; uploads via
-  `upload_zarr_store` after local temp write
-- `StrEnum` used for `JobStatus` (Python 3.11+ UP042 compliance)
-- All `raise HTTPException` inside `except` blocks use `from None` / `from exc` (B904)
-- Ingest response echoes actual job status so mock callers see "complete" immediately
+**Design:** `DEEPSEISMIC_MOCK_MODE=true` gates mock behavior; BackgroundTasks for job runner; all HTTPException use `from None`/`from exc`; StrEnum for JobStatus (Python 3.11+ compliance).
 
-**API contract (base URL: http://localhost:8000):**
-```
-GET  /health
-GET  /api/surveys
-GET  /api/surveys/{survey_id}
-POST /api/surveys/ingest
-GET  /api/surveys/{survey_id}/inline/{number}
-GET  /api/surveys/{survey_id}/crossline/{number}
-POST /api/interpretation/fault-detection
-GET  /api/interpretation/{run_id}/status
-GET  /api/interpretation/{run_id}/results
-GET  /api/interpretation/{run_id}/overlay/{inline_number}
-GET  /api/wells
-GET  /api/wells/{well_id}
-GET  /api/wells/{well_id}/logs
-```
+**API contract verified.** Ruff clean on all six files.
 
-**Ruff passed clean on all six API files.**
+### Scribe Cross-Agent Updates (2026-06-10 to 2026-06-24)
 
-## Scribe Cross-Agent Update — 2026-06-10T04:30-05:00
-Sprint 1 coordination complete. All agents delivered successfully.
-- 5 agents synchronized
-- 7 decision documents archived
-- Full team context available in decisions.md
+- 2026-06-10: Sprint 1 coordination complete; 5 agents synchronized, 7 decisions archived
+- 2026-06-24: Process emulation gaps identified (C1: synthetic-only training, C2: no validation pass, C3: README overstates maturity); consolidated findings to decisions.md
 
-## Learnings — 2026-06-24T18:05:41-05:00: Process Emulation Gap Assessment
+### 2026-06-24: Process Emulation Gap Assessment → Sprint 2 Minimum Fix
 
-### Key findings
+**Key findings:** ML core is hollow (synthetic-only training, labels unwired, validation never exercised, 100% mock demo). **What IS real:** SEG-Y ingest, Zarr conversion, UNet3D architecture, sliding-window inference, patch extraction, API contract, agent tool wiring.
 
-1. **The ML core is hollow.** Training runs only on programmatically-generated synthetic data (one planar fault in a 96×128×128 toy volume). The model has never seen real geology. `checkpoints/latest.pt` has placeholder metrics (IoU=0.0, Dice=0.0).
+**Gaps:** C1 (synthetic training), C2 (no validation pass), C3 (misleading README); 5 important gaps; minimum fix: wire real labels (~4h), eval script (~2h), README fix (~30min).
 
-2. **Label pipeline exists but is unwired.** `label_generator.py` correctly parses Volve fault sticks and rasterises them. But the training module (`train.py`) never calls it — it generates its own synthetic data instead.
+### 2026-06-24 to 2026-06-25: Sprint 2 & 3 Documentation, Real-Data Readiness
 
-3. **Validation code exists but is never exercised.** `validation/__init__.py` implements IoU, Dice, ASSD, distance-tolerant metrics. No script or pipeline ever invokes `evaluate_model()`.
+- **S2-04:** README rewrite with "What's real vs. demo" table, real metrics (val IoU=0.047/Dice=0.089 @ epoch 18), reproduction commands verified
+- **S2-09:** New `docs/task-framing.md` — task difference (binary fault detection on Volve vs. original's multi-class facies on F3/Penobscot), correct lineage, appropriate metrics
+- **Sprint 3:** De-mock + real-data readiness; released v0.4.0; API/agent fail-loud 503 handling, AZURE_PROJECT_ENDPOINT validation, ST10010 geometry integration, dense label densification (0.30% synthetic), 292 tests passing
 
-4. **Default demo is 100% mock.** README tells users to set `DEEPSEISMIC_MOCK_MODE=true` and `MOCK_LLM=true`. Both API and agent return canned data. The Streamlit viewer shows pre-baked inference results.
+**Blocker dependencies documented:** ST10010_PSDM_TIME.segy to ADLS (infra #11), Databricks Marketplace install, private endpoint setup.
 
-5. **README "full end-to-end pipeline" claim is misleading.** Code exists at every stage, but the pipeline has never run end-to-end on real data with real labels and real evaluation.
-
-6. **What IS real and good:** SEG-Y ingest, Zarr conversion, UNet3D architecture, sliding-window inference engine, patch extraction with spatial splits, API contract design, agent tool wiring. The serving/consumption layer exceeds the original.
-
-### Critical gaps (3)
-- C1: Training on synthetic-only data
-- C2: No validation pass
-- C3: README overstates maturity
-
-### Minimum fix set for Sprint 2
-- Wire real Volve fault labels into training path
-- Add `scripts/evaluate.py` that calls `evaluate_model()`
-- Qualify README claims with honest maturity section
 
 ### Decision
 Full gap list written to `.squad/decisions/inbox/ripley-process-emulation-gaps.md`.
@@ -255,4 +265,19 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 - Cross-agent history updated
 
 **Next step:** Team review of PRs #27 and #28. Once both are merged, v0.4.0 patch is ready.
+
+## Scribe Cross-Agent Update — 2026-07-09T22:43:22Z
+
+**F3 Training Data: External Sourcing Required**
+
+Cross-survey training blocked until F3 data is externally sourced. Issue #31 investigation confirms: real F3 data NOT present in repo (only synthetic proxy). Must ingest from public **OpendTect F3 Demo** (dGB Earth Sciences / TerraNubis, CC BY-SA). Existing `scripts/download_f3.py` documents the acquisition contract. Use `parse_opendtect_fault_sticks` parser (not Petrel).
+
+**Leakage Gate (Hard Rule):** F3 = training input only; Volve = scoring/evaluation target only (issue #24). No cross-survey contamination.
+
+**Geometry:** IL 100–750, XL 300–1250, ~462 samples @ 4ms.
+
+**T4 Compute:** GPU workload profile provisioned (Spava-Corp/deepseismic2-infra#23). Data staging must complete before T4 training run.
+
+**Decision:** `.squad/decisions.md` — F3 Ingest Contract (approved/in-progress).
+
 

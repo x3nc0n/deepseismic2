@@ -399,6 +399,84 @@ def parse_opendtect_fault_sticks(path: str | Path) -> list[FaultStick]:
     return sticks
 
 
+def parse_f3_fault_sticks(path: str | Path) -> list[FaultStick]:
+    """Parse an F3 Demo (dGB / TerraNubis) 5-column fault-stick export.
+
+    F3 fault interpretations are distributed as **headerless** ASCII tables
+    with five whitespace/tab-delimited columns and world map coordinates::
+
+        624690.0625  6074133   294.465  0 0
+        624643.8125  6074132   368.093  0 1
+        ...
+        624505.1875  6074528   291.795  1 0
+
+    Columns
+    -------
+    ``col1`` X map coordinate (metres)
+    ``col2`` Y map coordinate (metres)
+    ``col3`` Z / two-way time (milliseconds)
+    ``col4`` stick_id — integer grouping points into distinct fault segments
+    ``col5`` point_id — 0-based ordinal of the point within its stick
+
+    Points are grouped by ``stick_id`` into separate :class:`FaultStick`
+    objects (one stick = one fault segment) and ordered by ``point_id`` for
+    safety.  Blank lines and ``#`` comments are skipped defensively.  Each
+    returned stick is named ``"<file-stem>_stick<stick_id>"`` for uniqueness
+    across multiple files, and degenerate single-point sticks are dropped
+    (``>= 2`` points required), matching :func:`parse_opendtect_fault_sticks`.
+
+    Unlike the Volve/OpendTect index-space path, the returned points carry
+    **world XY** coordinates and must be rasterised via
+    :meth:`FaultMaskGenerator.add_fault_sticks` with a :class:`SurveyTransform`
+    (world→inline/crossline), not the index-space path.
+
+    Parameters
+    ----------
+    path:
+        Path to a single F3 fault-stick ASCII file (e.g. ``FaultA.txt``).
+
+    Returns
+    -------
+    list[FaultStick]
+    """
+    path = Path(path)
+    # stick_id -> list of (point_id, x, y, z_ms)
+    by_stick: dict[int, list[tuple[int, float, float, float]]] = {}
+
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            try:
+                x = float(parts[0])
+                y = float(parts[1])
+                z_ms = float(parts[2])
+                stick_id = int(float(parts[3]))
+                point_id = int(float(parts[4]))
+            except ValueError:
+                continue
+            by_stick.setdefault(stick_id, []).append((point_id, x, y, z_ms))
+
+    stem = path.stem
+    sticks: list[FaultStick] = []
+    for stick_id in sorted(by_stick):
+        ordered = sorted(by_stick[stick_id], key=lambda t: t[0])
+        points = [FaultPoint(x, y, z_ms) for (_pid, x, y, z_ms) in ordered]
+        if len(points) < 2:
+            continue
+        sticks.append(FaultStick(fault_name=f"{stem}_stick{stick_id}", points=points))
+
+    logger.info(
+        "Parsed %d F3 fault sticks (%d stick_ids) from %s",
+        len(sticks), len(by_stick), path.name,
+    )
+    return sticks
+
+
 # ---------------------------------------------------------------------------
 # Rasteriser
 # ---------------------------------------------------------------------------

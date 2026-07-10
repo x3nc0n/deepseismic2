@@ -255,3 +255,127 @@ class TestParseF3FaultSticks:
         gen.add_fault_sticks(sticks, transform)
         assert gen.mask.sum() > 0, "world-coordinate rasterisation produced empty mask"
         assert gen.mask.dtype == np.uint8
+
+
+# ---------------------------------------------------------------------------
+# Blocker 1b — corner_points robust to ABSENT grid-corner traces (issue #31
+# follow-up). On the real F3 SEG-Y the (il_max, xl_min) corner trace is one of
+# ~434 missing irregular-edge traces, so the old exact-corner-trace lookup
+# returned corner_points=None. The affine fit must evaluate the corners instead.
+# ---------------------------------------------------------------------------
+
+# A rotated/sheared affine (with cross terms) mimicking F3 UTM registration:
+#   x = _AX*il + _BX*xl + _CX
+#   y = _AY*il + _BY*xl + _CY
+_AX, _BX, _CX = 12.5, 24.0, 605000.0
+_AY, _BY, _CY = 23.0, -3.5, 6073000.0
+
+
+def _affine_x(il: int, xl: int) -> float:
+    return _AX * il + _BX * xl + _CX
+
+
+def _affine_y(il: int, xl: int) -> float:
+    return _AY * il + _BY * xl + _CY
+
+
+def _make_affine_segy(dest: Path, dropped: set[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Write a SEG-Y whose CDP-X/Y are an exact affine of (il, xl).
+
+    ``dropped`` cells (including exact grid corners) are omitted from the file,
+    mirroring the missing irregular-edge traces of the real F3 survey. A
+    coordinate scalar of -10 is written (scaled = raw / 10) to exercise the
+    scalar path, so the raw header values are the true metres * 10.
+    """
+    n_il, n_xl, n_s = 5, 10, 8
+    il0, xl0 = 100, 300
+    pairs = [
+        (il, xl)
+        for il in range(il0, il0 + n_il)
+        for xl in range(xl0, xl0 + n_xl)
+        if (il, xl) not in dropped
+    ]
+    spec = segyio.spec()
+    spec.sorting = segyio.TraceSortingFormat.INLINE_SORTING
+    spec.format = segyio.SegySampleFormat.IEEE_FLOAT_4_BYTE
+    spec.samples = np.arange(n_s, dtype=np.float32) * 4.0
+    spec.tracecount = len(pairs)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with segyio.create(str(dest), spec) as f:
+        f.bin.update(hdt=4000, dto=4000)
+        for tr, (il, xl) in enumerate(pairs):
+            f.header[tr] = {
+                segyio.TraceField.INLINE_3D: il,
+                segyio.TraceField.CROSSLINE_3D: xl,
+                # Raw = true metres * 10 so scalar -10 recovers the metres.
+                segyio.TraceField.CDP_X: int(round(_affine_x(il, xl) * 10)),
+                segyio.TraceField.CDP_Y: int(round(_affine_y(il, xl) * 10)),
+                segyio.TraceField.SourceGroupScalar: -10,
+                segyio.TraceField.TRACE_SEQUENCE_FILE: tr + 1,
+            }
+            f.trace[tr] = np.full(n_s, float(il * 1000 + xl), dtype=np.float32)
+    return pairs
+
+
+class TestCornerPointsRobustToMissingCornerTrace:
+    """The affine fit must emit corner tie-points even when corner traces are absent."""
+
+    # (il_max, xl_min) = (104, 300) is the corner absent on real F3; drop it
+    # plus a couple of other edge traces. IL/XL min-max extent is preserved
+    # because other traces still occupy il=104 and xl=300.
+    _MISSING = {(104, 300), (104, 301), (103, 300)}
+
+    def test_corner_points_non_null_despite_missing_corner_trace(self, tmp_path: Path) -> None:
+        from deepseismic.ingest.segy_loader import load_segy
+
+        segy = tmp_path / "affine_missing_corner.segy"
+        _make_affine_segy(segy, self._MISSING)
+
+        # The exact (il_max, xl_min) corner trace is genuinely absent from the file.
+        assert (104, 300) in self._MISSING
+
+        _, geom = load_segy(str(segy))
+
+        assert geom.corner_points is not None, (
+            "corner_points must be non-null even though the (104,300) corner trace "
+            "is absent — tie-points are evaluated from the fitted affine, not looked up"
+        )
+        assert len(geom.corner_points) == 3
+
+    def test_corner_points_match_affine_at_exact_corners(self, tmp_path: Path) -> None:
+        from deepseismic.ingest.segy_loader import load_segy
+
+        segy = tmp_path / "affine_missing_corner.segy"
+        _make_affine_segy(segy, self._MISSING)
+
+        _, geom = load_segy(str(segy))
+        assert geom.corner_points is not None
+
+        # Corners emitted in order: (il_min,xl_min), (il_max,xl_min), (il_min,xl_max).
+        expected = [
+            (100, 300),
+            (104, 300),  # ← the ABSENT corner: proves evaluation, not lookup
+            (100, 309),
+        ]
+        for (x, y, il, xl), (eil, exl) in zip(geom.corner_points, expected, strict=True):
+            assert (int(il), int(xl)) == (eil, exl)
+            # Reconstructed metres match the known affine to < 1 mm (well under 1 m).
+            assert x == pytest.approx(_affine_x(eil, exl), abs=1e-3)
+            assert y == pytest.approx(_affine_y(eil, exl), abs=1e-3)
+
+    def test_survey_transform_roundtrips_from_derived_corners(self, tmp_path: Path) -> None:
+        from deepseismic.ingest.segy_loader import load_segy
+
+        segy = tmp_path / "affine_missing_corner.segy"
+        _make_affine_segy(segy, self._MISSING)
+        _, geom = load_segy(str(segy))
+        assert geom.corner_points is not None
+
+        # The derived tie-points must build a usable world→ilxl transform that
+        # inverts the affine at the absent corner within sub-bin tolerance.
+        transform = SurveyTransform.from_three_points(
+            tie_points=[(x, y, il, xl) for x, y, il, xl in geom.corner_points],
+        )
+        il_hat, xl_hat = transform.world_to_ilxl(_affine_x(104, 300), _affine_y(104, 300))
+        assert il_hat == pytest.approx(104, abs=1e-2)
+        assert xl_hat == pytest.approx(300, abs=1e-2)

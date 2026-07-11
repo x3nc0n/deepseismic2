@@ -49,7 +49,11 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from deepseismic.ingest.label_generator import FaultMaskGenerator  # noqa: E402,I001
+from deepseismic.ingest.label_generator import (  # noqa: E402,I001
+    FaultMaskGenerator,
+    SurveyTransform,
+    parse_f3_fault_sticks,
+)
 from deepseismic.validation import load_volve_fault_sticks  # noqa: E402,I001
 
 logging.basicConfig(
@@ -72,6 +76,37 @@ def _load_geometry(json_path: Path) -> dict:
     with open(json_path) as f:
         meta = json.load(f)
     return meta["geometry"]
+
+
+def _build_survey_transform(geom: dict) -> SurveyTransform:
+    """Build a world→(inline, crossline) :class:`SurveyTransform` from geometry.
+
+    F3 fault sticks are in world map coordinates, so rasterisation needs the
+    affine that maps (X, Y) → (inline, crossline).  This is derived from the
+    ``corner_points`` tie-points written into the amplitude JSON sidecar at
+    ingest (from the SEG-Y CDP-X/CDP-Y headers).
+
+    Exits with a precise, actionable message if the sidecar does not carry
+    corner-point georeference — the F3 world-coordinate path cannot proceed
+    without it (see issue #31 follow-up).
+    """
+    corner_points = geom.get("corner_points")
+    if not corner_points or len(corner_points) < 3:
+        sys.exit(
+            "ERROR: amplitude JSON sidecar has no 'corner_points' georeference — "
+            "cannot build the world→(inline, crossline) transform required by "
+            "--fault-format f3.\n"
+            "       Re-ingest the SEG-Y with the CDP-X/CDP-Y-aware loader so the "
+            "sidecar carries corner tie-points (issue #31)."
+        )
+    tie_points = [
+        (float(x), float(y), int(il), int(xl)) for (x, y, il, xl) in corner_points[:3]
+    ]
+    return SurveyTransform.from_three_points(
+        tie_points=tie_points,
+        sample_rate_ms=geom["sample_rate_ms"],
+        datum_ms=geom["datum_ms"],
+    )
 
 
 def _report_sticks(sticks: list[np.ndarray], geom: dict) -> None:
@@ -137,6 +172,16 @@ def main() -> None:
                              "Do not exceed 3 without geophysical justification (λ/4 ≈ 13.7 m).")
     parser.add_argument("--overwrite", action="store_true",
                         help="Overwrite an existing label Zarr.")
+    parser.add_argument(
+        "--fault-format", choices=["volve", "f3", "opendtect"], default="volve",
+        help=(
+            "Fault-stick input format. 'volve' (default): 3-column index-space "
+            ".dat files rasterised in index space (unchanged behaviour). "
+            "'f3': headerless 5-column world-coordinate .txt files "
+            "(X Y Z_ms stick_id point_id), rasterised via the world-coordinate "
+            "transform derived from the amplitude sidecar corner points."
+        ),
+    )
     parser.add_argument("--interpolate-between", action="store_true",
                         help="Densify each fault stick to 1-IL resolution. "
                              "Bridges IL gaps ≤ --max-interp-gap (planar-fault assumption). "
@@ -183,12 +228,20 @@ def main() -> None:
     if not FAULT_STICK_DIR.exists():
         sys.exit(
             f"ERROR: Fault-stick directory not found: {FAULT_STICK_DIR}\n"
-            "       Real .dat files are required (S2-01 risk #1 — no fallback)."
+            "       Real fault-stick files are required (S2-01 risk #1 — no fallback)."
         )
-    dat_files = sorted(FAULT_STICK_DIR.glob("*.dat"))
+    if args.fault_format == "f3":
+        # F3 Demo distributes fault sticks as headerless 5-column .txt files.
+        dat_files = sorted(FAULT_STICK_DIR.glob("*.txt")) or sorted(
+            FAULT_STICK_DIR.glob("*.dat")
+        )
+        _pattern = "*.txt/*.dat"
+    else:
+        dat_files = sorted(FAULT_STICK_DIR.glob("*.dat"))
+        _pattern = "*.dat"
     if not dat_files:
         sys.exit(
-            f"ERROR: No .dat files found in {FAULT_STICK_DIR}\n"
+            f"ERROR: No {_pattern} files found in {FAULT_STICK_DIR}\n"
             "       Real fault sticks are required — no silent fallback to synthetic."
         )
     if not AMPLITUDE_JSON.exists():
@@ -199,7 +252,10 @@ def main() -> None:
             "       Tip: python scripts/generate_fault_label.py --overwrite"
         )
 
-    logger.info("Fault-stick dir : %s  (%d .dat files)", FAULT_STICK_DIR, len(dat_files))
+    logger.info(
+        "Fault-stick dir : %s  (%d files, format=%s)",
+        FAULT_STICK_DIR, len(dat_files), args.fault_format,
+    )
     for f in dat_files:
         logger.info("  %s", f.name)
     logger.info("Amplitude JSON  : %s", AMPLITUDE_JSON)
@@ -218,63 +274,14 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Parse fault sticks
+    # Parse fault sticks + rasterise
     # ------------------------------------------------------------------
-    # load_volve_fault_sticks reads col[0]=il_idx, col[1]=xl_idx, col[-1]=z_col
-    # For our 3-column files this maps perfectly.
-    sticks = load_volve_fault_sticks(FAULT_STICK_DIR)
-    if not sticks:
-        sys.exit(
-            "ERROR: Parsed 0 fault sticks from .dat files.\n"
-            "       Check file format (expected 3-col: inline_idx crossline_idx z_col)."
-        )
-
-    logger.info("Parsed %d fault sticks", len(sticks))
-    _report_sticks(sticks, geom)
-
-    # ------------------------------------------------------------------
-    # Coordinate mapping (documented for Ash's review)
-    # ------------------------------------------------------------------
-    # Each stick is np.ndarray shape (N, 3): [il_idx, xl_idx, z_col]
-    # z_col is a SAMPLE INDEX (0-based), not ms, despite the file comment.
-    # abs_inline = BASE_IL(1001) + il_idx
-    # abs_crossline = BASE_XL(1900) + xl_idx
-    # twt_ms = z_col * sample_rate_ms(4.0)
-    # No conversion needed — values are already 0-based index space.
-
-    indexed_sticks: list[list[tuple[float, float, float]]] = []
-    for stick_arr in sticks:
-        pts = [(float(r[0]), float(r[1]), float(r[2])) for r in stick_arr]
-        indexed_sticks.append(pts)
-
-    total_raw_pts = sum(len(s) for s in indexed_sticks)
-    logger.info("Total raw points to rasterise: %d", total_raw_pts)
-
-    # Detect synthetic proxy directory for QC labeling
-    _synth_dir = _REPO_ROOT / "data/volve/interpretations/fault_sticks_synth"
-    is_synthetic_proxy = FAULT_STICK_DIR.resolve() == _synth_dir.resolve()
-    if is_synthetic_proxy:
-        logger.warning(
-            "[SYNTHETIC PROXY] Stick dir is fault_sticks_synth/ — output is a "
-            "densification proxy for app-readiness testing, NOT real Volve ground truth."
-        )
-
-    # ------------------------------------------------------------------
-    # Rasterise — baseline (no interpolation) for before/after reporting
-    # ------------------------------------------------------------------
-    _xl_range = (geom["crossline_min"], geom["crossline_max"], geom["crossline_step"])
-    gen = FaultMaskGenerator(
-        volume_shape     = vol_shape,
-        inline_range     = (geom["inline_min"], geom["inline_max"], geom["inline_step"]),
-        crossline_range  = _xl_range,
-        sample_rate_ms   = geom["sample_rate_ms"],
-        datum_ms         = geom["datum_ms"],
-        dilation_voxels  = args.dilation,
-    )
-
-    if args.interpolate_between:
-        # Run baseline pass first (no interpolation) so we can report before/after
-        gen_baseline = FaultMaskGenerator(
+    if args.fault_format == "f3":
+        # F3 world-coordinate path: sticks carry map XY + TWT(ms); rasterise via
+        # the world→(inline, crossline) transform from the sidecar corner points.
+        transform = _build_survey_transform(geom)
+        _xl_range = (geom["crossline_min"], geom["crossline_max"], geom["crossline_step"])
+        gen = FaultMaskGenerator(
             volume_shape    = vol_shape,
             inline_range    = (geom["inline_min"], geom["inline_max"], geom["inline_step"]),
             crossline_range = _xl_range,
@@ -282,21 +289,104 @@ def main() -> None:
             datum_ms        = geom["datum_ms"],
             dilation_voxels = args.dilation,
         )
-        gen_baseline.add_fault_sticks_in_index_space(indexed_sticks, interpolate_between=False)
-        baseline_voxels = int(gen_baseline.mask.sum())
-        baseline_frac   = baseline_voxels / vol_shape[0] / vol_shape[1] / vol_shape[2]
-
-        gen.add_fault_sticks_in_index_space(
-            indexed_sticks,
-            interpolate_between=True,
-            max_interp_gap_il=args.max_interp_gap,
+        sticks = []
+        for f in dat_files:
+            file_sticks = parse_f3_fault_sticks(f)
+            logger.info("  %s → %d sticks", f.name, len(file_sticks))
+            sticks.extend(file_sticks)
+        if not sticks:
+            sys.exit(
+                "ERROR: Parsed 0 F3 fault sticks.\n"
+                "       Expected headerless 5-col: X Y Z_ms stick_id point_id."
+            )
+        total_raw_pts = sum(len(s) for s in sticks)
+        logger.info(
+            "Parsed %d F3 fault sticks (%d raw points) across %d file(s)",
+            len(sticks), total_raw_pts, len(dat_files),
         )
-    else:
-        gen.add_fault_sticks_in_index_space(indexed_sticks, interpolate_between=False)
+        gen.add_fault_sticks(sticks, transform)
         baseline_voxels = None
         baseline_frac   = None
+        is_synthetic_proxy = False
+        mask = gen.mask
+    else:
+        # load_volve_fault_sticks reads col[0]=il_idx, col[1]=xl_idx, col[-1]=z_col
+        # For our 3-column files this maps perfectly.
+        sticks = load_volve_fault_sticks(FAULT_STICK_DIR)
+        if not sticks:
+            sys.exit(
+                "ERROR: Parsed 0 fault sticks from .dat files.\n"
+                "       Check file format (expected 3-col: inline_idx crossline_idx z_col)."
+            )
 
-    mask = gen.mask
+        logger.info("Parsed %d fault sticks", len(sticks))
+        _report_sticks(sticks, geom)
+
+        # --------------------------------------------------------------
+        # Coordinate mapping (documented for Ash's review)
+        # --------------------------------------------------------------
+        # Each stick is np.ndarray shape (N, 3): [il_idx, xl_idx, z_col]
+        # z_col is a SAMPLE INDEX (0-based), not ms, despite the file comment.
+        # abs_inline = BASE_IL(1001) + il_idx
+        # abs_crossline = BASE_XL(1900) + xl_idx
+        # twt_ms = z_col * sample_rate_ms(4.0)
+        # No conversion needed — values are already 0-based index space.
+
+        indexed_sticks: list[list[tuple[float, float, float]]] = []
+        for stick_arr in sticks:
+            pts = [(float(r[0]), float(r[1]), float(r[2])) for r in stick_arr]
+            indexed_sticks.append(pts)
+
+        total_raw_pts = sum(len(s) for s in indexed_sticks)
+        logger.info("Total raw points to rasterise: %d", total_raw_pts)
+
+        # Detect synthetic proxy directory for QC labeling
+        _synth_dir = _REPO_ROOT / "data/volve/interpretations/fault_sticks_synth"
+        is_synthetic_proxy = FAULT_STICK_DIR.resolve() == _synth_dir.resolve()
+        if is_synthetic_proxy:
+            logger.warning(
+                "[SYNTHETIC PROXY] Stick dir is fault_sticks_synth/ — output is a "
+                "densification proxy for app-readiness testing, NOT real Volve ground truth."
+            )
+
+        # --------------------------------------------------------------
+        # Rasterise — baseline (no interpolation) for before/after reporting
+        # --------------------------------------------------------------
+        _xl_range = (geom["crossline_min"], geom["crossline_max"], geom["crossline_step"])
+        gen = FaultMaskGenerator(
+            volume_shape     = vol_shape,
+            inline_range     = (geom["inline_min"], geom["inline_max"], geom["inline_step"]),
+            crossline_range  = _xl_range,
+            sample_rate_ms   = geom["sample_rate_ms"],
+            datum_ms         = geom["datum_ms"],
+            dilation_voxels  = args.dilation,
+        )
+
+        if args.interpolate_between:
+            # Run baseline pass first (no interpolation) so we can report before/after
+            gen_baseline = FaultMaskGenerator(
+                volume_shape    = vol_shape,
+                inline_range    = (geom["inline_min"], geom["inline_max"], geom["inline_step"]),
+                crossline_range = _xl_range,
+                sample_rate_ms  = geom["sample_rate_ms"],
+                datum_ms        = geom["datum_ms"],
+                dilation_voxels = args.dilation,
+            )
+            gen_baseline.add_fault_sticks_in_index_space(indexed_sticks, interpolate_between=False)
+            baseline_voxels = int(gen_baseline.mask.sum())
+            baseline_frac   = baseline_voxels / vol_shape[0] / vol_shape[1] / vol_shape[2]
+
+            gen.add_fault_sticks_in_index_space(
+                indexed_sticks,
+                interpolate_between=True,
+                max_interp_gap_il=args.max_interp_gap,
+            )
+        else:
+            gen.add_fault_sticks_in_index_space(indexed_sticks, interpolate_between=False)
+            baseline_voxels = None
+            baseline_frac   = None
+
+        mask = gen.mask
 
     # ------------------------------------------------------------------
     # QC report

@@ -161,3 +161,18 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 - `list_blobs` fallback is only attempted when index scan yields no matches — avoids HNS errors on the hot path.
 - Pending manifest at submit means step 2 (exact download) also works for the full id immediately — redundant with the index but provides defense-in-depth across replicas.
 - PR: https://github.com/x3nc0n/deepseismic2/pull/28
+
+## Scribe Cross-Agent Update — 2026-07-09T22:43:22Z
+
+**F3 Training Data: External Sourcing Required**
+
+Cross-survey training run blocked until F3 data is externally sourced. Issue #31 investigation confirms: real F3 data NOT present in repo (only synthetic proxy). Must ingest from public **OpendTect F3 Demo** (dGB Earth Sciences / TerraNubis, CC BY-SA). Existing `scripts/download_f3.py` documents the acquisition contract. Use `parse_opendtect_fault_sticks` parser (not Petrel).
+
+**Leakage Gate (Hard Rule):** F3 = training input only; Volve = scoring/evaluation target only (issue #24). No cross-survey contamination.
+
+**Geometry:** IL 100–750, XL 300–1250, ~462 samples @ 4ms.
+
+**T4 Compute:** GPU workload profile provisioned (Spava-Corp/deepseismic2-infra#23). Data staging must complete before T4 training run.
+
+**Decision:** `.squad/decisions.md` — F3 Ingest Contract (approved/in-progress).
+

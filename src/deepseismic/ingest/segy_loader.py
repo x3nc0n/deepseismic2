@@ -64,6 +64,31 @@ logger = logging.getLogger(__name__)
 # for typical cloud object-storage (Azure Blob 4-MB block alignment).
 DEFAULT_CHUNKS: tuple[int, int, int] = (64, 64, 128)
 
+# Substrings that identify a segyio geometry-inference failure caused by an
+# irregular trace grid (edge-of-survey traces absent, so ilines*xlines does not
+# equal the trace count).  segyio phrases this differently across versions:
+#   - "Inlines inconsistent"                      (older, per-inline XL mismatch)
+#   - "Invalid dimensions ... should match the number of traces (N)"  (real F3)
+# Both mean the same thing: the structured reader can't build a rectangular grid,
+# and we should fall back to the header-driven irregular reconstruction.
+_IRREGULAR_GEOMETRY_ERROR_MARKERS: tuple[str, ...] = (
+    "inconsistent",
+    "invalid dimensions",
+    "should match the number of traces",
+)
+
+
+def _is_irregular_geometry_error(exc: Exception) -> bool:
+    """Return ``True`` if *exc* is a segyio irregular-grid geometry error.
+
+    Used to decide whether :meth:`SEGYLoader.load` should fall back to the
+    header-driven irregular-grid reconstruction.  Kept deliberately narrow (a
+    fixed set of known substrings) so genuinely unrelated ``ValueError``\\ s are
+    still re-raised instead of being silently swallowed.
+    """
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _IRREGULAR_GEOMETRY_ERROR_MARKERS)
+
 
 # ---------------------------------------------------------------------------
 # Survey geometry
@@ -89,6 +114,12 @@ class SurveyGeometry:
     n_inlines: int
     n_crosslines: int
     datum_ms: float = 0.0  # DelayRecordingTime from trace header byte 109
+    # Optional world-coordinate tie-points ``[[x, y, il, xl], ...]`` derived
+    # from CDP-X/CDP-Y (bytes 181/185, coordinate scalar applied).  Populated at
+    # ingest when the SEG-Y carries CDP coordinates; enables downstream
+    # world→(inline, crossline) transforms (e.g. F3 world-coordinate fault
+    # rasterisation).  ``None`` when CDP coordinates are absent/zero.
+    corner_points: list[list[float]] | None = None
 
     @property
     def inlines(self) -> np.ndarray:
@@ -239,9 +270,11 @@ class SEGYLoader:
                 data = self._read_traces(f, geom)
         except ValueError as exc:
             # Real surveys often have irregular XL counts per inline (edge-of-survey
-            # boundary traces absent).  segyio raises "Inlines inconsistent" in that case.
-            # Fall back to reading all trace headers explicitly and building a padded volume.
-            if "inconsistent" not in str(exc).lower():
+            # boundary traces absent).  segyio raises "Inlines inconsistent" OR
+            # "Invalid dimensions ... should match the number of traces" in that case
+            # (the exact wording differs; real F3 emits the latter).  Fall back to
+            # reading all trace headers explicitly and building a padded volume.
+            if not _is_irregular_geometry_error(exc):
                 raise
             logger.warning(
                 "segyio geometry inference failed (%s); falling back to "
@@ -366,7 +399,127 @@ class SEGYLoader:
             n_inlines=len(inlines),
             n_crosslines=len(crosslines),
             datum_ms=datum_ms,
+            corner_points=self._extract_corner_tie_points(f),
         )
+
+    # Max acceptable least-squares residual (metres) between the fitted affine
+    # and the observed CDP-X/CDP-Y.  A regular acquisition geometry maps
+    # (il, xl) → (x, y) exactly by an affine, so residuals should be ~0.  We
+    # allow a few F3 grid spacings (~25 m bin × a small factor) of slack to
+    # tolerate header quantisation; anything larger means the mapping is not
+    # affine (bad headers) and we refuse to emit tie-points rather than
+    # mis-register the labels downstream.
+    _AFFINE_RESIDUAL_MAX_M = 100.0
+
+    @classmethod
+    def _extract_corner_tie_points(cls, f: segyio.SegyFile) -> list[list[float]] | None:
+        """Derive three world-coordinate tie-points from CDP-X/CDP-Y headers.
+
+        Reads per-trace ``CDP_X`` (byte 181), ``CDP_Y`` (byte 185),
+        ``INLINE_3D`` (byte 189) and ``CROSSLINE_3D`` (byte 193) via bulk
+        ``attributes()`` calls, then fits the affine mapping
+        ``(il, xl) → x`` and ``(il, xl) → y`` by least squares over **all**
+        traces.  The three returned ``[x, y, inline, crossline]`` tie-points are
+        produced by *evaluating* that fitted affine at the exact grid corners
+        ``(il_min, xl_min)``, ``(il_max, xl_min)`` and ``(il_min, xl_max)``.
+
+        Evaluating (rather than looking up) the corners means the derivation is
+        robust to **absent corner traces** — common on irregular surveys such as
+        F3 Demo, where the ``(il_max, xl_min)`` corner trace is one of ~434
+        missing edge traces.  A pure corner-trace lookup returns ``None`` in that
+        case; the affine fit does not.
+
+        The SEG-Y coordinate scalar (byte 71, ``SourceGroupScalar``) is applied
+        so the returned X/Y are in true map units (metres).  Returns ``None``
+        when CDP coordinates are absent or all-zero (no world georeference), or
+        when the affine fit residual is implausibly large (non-affine headers),
+        in which case downstream world-coordinate transforms are unavailable and
+        the pipeline fails loud rather than mis-registering.
+        """
+        try:
+            ils = np.asarray(f.attributes(segyio.TraceField.INLINE_3D)[:], dtype=np.int64)
+            xls = np.asarray(f.attributes(segyio.TraceField.CROSSLINE_3D)[:], dtype=np.int64)
+            cdpx = np.asarray(f.attributes(segyio.TraceField.CDP_X)[:], dtype=np.float64)
+            cdpy = np.asarray(f.attributes(segyio.TraceField.CDP_Y)[:], dtype=np.float64)
+            scalars = np.asarray(
+                f.attributes(segyio.TraceField.SourceGroupScalar)[:], dtype=np.float64
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Could not read CDP corner coordinates: %s", exc)
+            return None
+
+        if ils.size == 0 or (np.all(cdpx == 0.0) and np.all(cdpy == 0.0)):
+            logger.info("No CDP-X/CDP-Y georeference present; corner_points=None.")
+            return None
+
+        # Apply the SEG-Y coordinate scalar: negative → divide, positive → multiply.
+        scalar = float(scalars[0]) if scalars.size else 0.0
+        if scalar < 0:
+            cdpx = cdpx / abs(scalar)
+            cdpy = cdpy / abs(scalar)
+        elif scalar > 0:
+            cdpx = cdpx * scalar
+            cdpy = cdpy * scalar
+
+        # Drop traces with no CDP fix (both X and Y zero) so all-zero edge cells
+        # cannot bias the fit; keep everything else.
+        valid = ~((cdpx == 0.0) & (cdpy == 0.0))
+        il_v = ils[valid].astype(np.float64)
+        xl_v = xls[valid].astype(np.float64)
+        x_v = cdpx[valid]
+        y_v = cdpy[valid]
+        if il_v.size < 3:
+            logger.warning(
+                "Too few CDP-fixed traces (%d) to fit affine; corner_points=None.",
+                int(il_v.size),
+            )
+            return None
+
+        # Optional even subsample for speed on very large surveys; a full fit is
+        # exact for a regular geometry, so subsampling only trades a negligible
+        # amount of numerical conditioning for a much smaller lstsq.
+        max_fit = 50_000
+        if il_v.size > max_fit:
+            step = int(np.ceil(il_v.size / max_fit))
+            il_v, xl_v, x_v, y_v = il_v[::step], xl_v[::step], x_v[::step], y_v[::step]
+
+        # Design matrix [il, xl, 1]; solve for x = ax*il + bx*xl + cx (and y).
+        design = np.column_stack([il_v, xl_v, np.ones_like(il_v)])
+        coef_x, _, _, _ = np.linalg.lstsq(design, x_v, rcond=None)
+        coef_y, _, _, _ = np.linalg.lstsq(design, y_v, rcond=None)
+
+        # Sanity: residual between the fit and the observed coordinates.
+        res_x = design @ coef_x - x_v
+        res_y = design @ coef_y - y_v
+        max_res = float(np.max(np.hypot(res_x, res_y)))
+        if max_res > cls._AFFINE_RESIDUAL_MAX_M:
+            logger.warning(
+                "Affine CDP fit residual %.1f m exceeds %.1f m; headers not "
+                "affine, corner_points=None.",
+                max_res,
+                cls._AFFINE_RESIDUAL_MAX_M,
+            )
+            return None
+
+        il_min, il_max = int(ils.min()), int(ils.max())
+        xl_min, xl_max = int(xls.min()), int(xls.max())
+
+        def eval_corner(il_c: int, xl_c: int) -> list[float]:
+            vec = np.array([il_c, xl_c, 1.0], dtype=np.float64)
+            return [float(vec @ coef_x), float(vec @ coef_y), int(il_c), int(xl_c)]
+
+        tie_points = [
+            eval_corner(il_min, xl_min),
+            eval_corner(il_max, xl_min),
+            eval_corner(il_min, xl_max),
+        ]
+        logger.info(
+            "Fitted affine CDP-X/Y (max residual %.3f m); emitted %d corner "
+            "tie-points by evaluation.",
+            max_res,
+            len(tie_points),
+        )
+        return tie_points
 
     def _read_traces(self, f: segyio.SegyFile, geom: SurveyGeometry) -> np.ndarray:
         """Read trace data into a ``(n_il, n_xl, n_s)`` float32 array."""
@@ -437,6 +590,7 @@ class SEGYLoader:
             n_inlines=len(unique_ils),
             n_crosslines=len(unique_xls),
             datum_ms=datum_ms,
+            corner_points=self._extract_corner_tie_points(f),
         )
         logger.info(
             "Irregular-grid geometry: IL %d–%d (n=%d), XL %d–%d (n=%d), "

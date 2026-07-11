@@ -2,6 +2,57 @@
 
 ## Active Decisions
 
+# Decision: F3 Ingest Contract (Cross-Survey Training)
+
+**Date:** 2026-07-09T17:36:13-05:00  
+**Author:** Dallas (Data/ML Engineer)  
+**Status:** Proposed — pending coordinator review + infra action  
+**Triggered by:** Issue #31 (infra request for F3 data readiness answers)
+
+## Decision
+
+F3 data for cross-survey training must be sourced from the public **OpendTect F3 Demo** dataset (dGB Earth Sciences / TerraNubis, CC BY-SA), ingested using the existing pipeline scripts without modification, and staged at the `surveys/f3-demo/` prefix in the `staged` container.
+
+## Rationale
+
+1. **Real data not present in repo.** Only a synthetic proxy exists in `data/f3/` (confirmed by `PROXY_DATA_DO_NOT_USE_AS_GROUND_TRUTH.txt`). All pipeline code is validated end-to-end against this proxy.
+
+2. **Acquisition contract is already documented.** `scripts/download_f3.py` (lines 28–120) specifies the source, URL, license, format, and drop paths. No new contract decisions are needed — this formalizes what was already written.
+
+3. **Parser choice is `parse_opendtect_fault_sticks`.** F3 fault interpretations are distributed as OpendTect ASCII fault-stick exports (`Fault: <name>` headers, `X Y Z inline crossline` columns). The Petrel parser (`parse_petrel_fault_sticks`) is for Volve's Petrel export format only.
+
+4. **Staged path convention.** Follows the established `staged/surveys/{survey_id}/` ADLS convention used for Volve (coded in `zarr_helpers.py` and `train.py`). Survey ID `f3-demo` distinguishes from any future F3 variants.
+
+## Contract Summary
+
+| Item | Value |
+|------|-------|
+| Seismic source | OpendTect F3 Demo (dGB / TerraNubis), SEG-Y |
+| Source URL | https://terranubis.com/datainfo/F3-Demo-2020 |
+| License | CC BY-SA |
+| Fault parser | `parse_opendtect_fault_sticks` (label_generator.py:346) |
+| Fault drop path | `data/f3/interpretations/fault_sticks/*.dat` (OpendTect ASCII) |
+| Staged seismic | `staged/surveys/f3-demo/amplitude.zarr` (array: `amplitude`) |
+| Staged labels | `staged/surveys/f3-demo/fault_label.zarr` (array: `fault_mask`) |
+| Geometry sidecar | `staged/surveys/f3-demo/amplitude.json` |
+| Reference geometry | IL 100–750, XL 300–1250, ~462 samples @ 4 ms (validate at ingest) |
+| Zarr chunk shape | (64, 64, 128) |
+
+## Leakage Gate
+
+**F3 = training input only. Volve = scoring/evaluation target only.**  
+Volve fault sticks must never appear in any F3 training job invocation. Hard rule per issue #24.
+
+## Evidence
+
+- `scripts/download_f3.py` — acquisition contract, geometry, parser choice
+- `src/deepseismic/ingest/label_generator.py:346` — `parse_opendtect_fault_sticks`
+- `src/deepseismic/training/train.py:69–73` — Azure path convention
+- `src/deepseismic/storage/zarr_helpers.py` — ADLS convention docstring
+- `data/f3/PROXY_DATA_DO_NOT_USE_AS_GROUND_TRUTH.txt` — confirms no real data present
+
+---
+
 # Decision: Release Workflow Rule (v0.6.5 Release)
 
 **Date:** 2026-06-29T20:00:00-05:00

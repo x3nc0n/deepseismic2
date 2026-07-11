@@ -23,6 +23,7 @@ from deepseismic.training.train import (
     TrainConfig,
     _accum_tp_fp_fn,
     _epoch_metrics,
+    _upload_checkpoints,
 )
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,87 @@ class TestTrainConfig:
         """Setting data_mode='zarr' must not raise (S2-02)."""
         cfg = TrainConfig(data_mode="zarr")
         assert cfg.data_mode == "zarr"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint blob upload
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointUpload:
+    """Verify final checkpoint uploads use StorageClient without real Azure."""
+
+    @staticmethod
+    def _write_artifacts(checkpoint_dir):
+        for filename in ("best.pt", "latest.pt", "run_config.json"):
+            (checkpoint_dir / filename).write_bytes(filename.encode())
+
+    def test_uploads_existing_checkpoint_artifacts(self, tmp_path, monkeypatch):
+        """A configured prefix uploads best/latest/config to the staged container."""
+        self._write_artifacts(tmp_path)
+        calls = []
+
+        class _MockStorageClient:
+            def upload_blob(self, container, blob_path, data, *, overwrite=True, metadata=None):
+                calls.append((container, blob_path, data.read(), overwrite, metadata))
+
+        monkeypatch.setattr(
+            "deepseismic.storage.blob_client.StorageClient",
+            _MockStorageClient,
+        )
+
+        cfg = TrainConfig(
+            checkpoint_dir=tmp_path,
+            checkpoint_upload_prefix="models/f3-demo/run-001/",
+        )
+        _upload_checkpoints(cfg)
+
+        assert calls == [
+            ("staged", "models/f3-demo/run-001/best.pt", b"best.pt", True, None),
+            ("staged", "models/f3-demo/run-001/latest.pt", b"latest.pt", True, None),
+            (
+                "staged",
+                "models/f3-demo/run-001/run_config.json",
+                b"run_config.json",
+                True,
+                None,
+            ),
+        ]
+
+    def test_no_prefix_does_not_build_storage_client(self, tmp_path, monkeypatch):
+        """No upload prefix leaves local checkpoint behavior unchanged."""
+        self._write_artifacts(tmp_path)
+
+        def _raise_if_called():
+            raise AssertionError("StorageClient should not be constructed")
+
+        monkeypatch.setattr(
+            "deepseismic.storage.blob_client.StorageClient",
+            _raise_if_called,
+        )
+
+        cfg = TrainConfig(checkpoint_dir=tmp_path, checkpoint_upload_prefix=None)
+        _upload_checkpoints(cfg)
+
+    def test_upload_failure_raises(self, tmp_path, monkeypatch):
+        """Upload errors must fail the training process loudly."""
+        self._write_artifacts(tmp_path)
+
+        class _FailingStorageClient:
+            def upload_blob(self, container, blob_path, data, *, overwrite=True, metadata=None):
+                raise OSError("network unavailable")
+
+        monkeypatch.setattr(
+            "deepseismic.storage.blob_client.StorageClient",
+            _FailingStorageClient,
+        )
+
+        cfg = TrainConfig(
+            checkpoint_dir=tmp_path,
+            checkpoint_upload_prefix="models/f3-demo/run-001",
+        )
+        with pytest.raises(RuntimeError, match="Failed to upload checkpoint artifact"):
+            _upload_checkpoints(cfg)
 
 
 # ---------------------------------------------------------------------------

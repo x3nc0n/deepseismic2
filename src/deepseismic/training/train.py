@@ -49,6 +49,8 @@ class TrainConfig:
     device: str = "cpu"
     checkpoint_dir: Path = Path("checkpoints")
     save_every: int = 5
+    checkpoint_upload_prefix: str | None = None
+    checkpoint_upload_container: str = "staged"
     # Imbalance: synthetic default; zarr default overridden in train()
     pos_weight: float = 10.0
 
@@ -232,6 +234,43 @@ def _epoch_metrics(tp: float, fp: float, fn: float) -> dict[str, float]:
     precision = tp / (tp + fp + 1e-8)
     recall = tp / (tp + fn + 1e-8)
     return {"iou": iou, "dice": dice, "precision": precision, "recall": recall}
+
+
+def _upload_checkpoints(config: TrainConfig) -> None:
+    """Upload final checkpoint artifacts when checkpoint blob upload is enabled."""
+    if not config.checkpoint_upload_prefix:
+        return
+
+    from deepseismic.storage.blob_client import StorageClient
+
+    prefix = config.checkpoint_upload_prefix.rstrip("/")
+    client = StorageClient()
+    for filename in ("best.pt", "latest.pt", "run_config.json"):
+        artifact_path = config.checkpoint_dir / filename
+        if not artifact_path.exists():
+            logger.warning("Checkpoint artifact missing; skipping upload: %s", artifact_path)
+            continue
+
+        blob_path = f"{prefix}/{filename}" if prefix else filename
+        try:
+            with open(artifact_path, "rb") as fh:
+                client.upload_blob(
+                    config.checkpoint_upload_container,
+                    blob_path,
+                    fh,
+                    overwrite=True,
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to upload checkpoint artifact "
+                f"{artifact_path} to "
+                f"{config.checkpoint_upload_container}/{blob_path}"
+            ) from exc
+        logger.info(
+            "Uploaded checkpoint artifact → %s/%s",
+            config.checkpoint_upload_container,
+            blob_path,
+        )
 
 
 def train_epoch(
@@ -429,6 +468,8 @@ def train(config: TrainConfig) -> Path:
     print(f"   Best checkpoint: {best_checkpoint}")
     print(f"   Latest checkpoint: {final_ckpt}")
     print(f"   Run config: {run_config_path}")
+
+    _upload_checkpoints(config)
 
     return best_checkpoint
 
@@ -665,6 +706,21 @@ def main() -> None:
         "--checkpoint-dir", default="checkpoints",
         help="Directory for checkpoints and run_config.json",
     )
+    parser.add_argument(
+        "--checkpoint-upload-prefix",
+        type=str,
+        default=None,
+        help=(
+            "When set, uploads final checkpoints (best.pt, latest.pt, "
+            "run_config.json) to the staged blob container under this prefix "
+            "using the job's managed identity (AAD)."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-upload-container",
+        default="staged",
+        help="Blob container for checkpoint uploads (default: staged)",
+    )
     # S3-06: storage backend
     parser.add_argument(
         "--storage-backend", choices=["local", "azure"], default="local",
@@ -725,6 +781,8 @@ def main() -> None:
         pos_weight=pos_weight,
         seed=args.seed,
         checkpoint_dir=Path(args.checkpoint_dir),
+        checkpoint_upload_prefix=args.checkpoint_upload_prefix,
+        checkpoint_upload_container=args.checkpoint_upload_container,
         storage_backend=args.storage_backend,
         az_seismic_container=args.az_seismic_container,
         az_seismic_prefix=args.az_seismic_prefix,

@@ -13,8 +13,8 @@ Design decisions
 - **Per-patch normalisation.**  Each seismic patch is independently normalised
   to zero-mean unit-variance.  This accommodates amplitude variation across
   the survey without needing a precomputed global statistics file.
-- **Lazy Zarr reads.**  Patches are read from Zarr on demand in ``__getitem__``
-  so the full volume never needs to be in RAM.
+- **Lazy reads.**  Patches are read on demand in ``__getitem__`` from a Zarr
+  array or a pre-cached in-memory ``np.ndarray``.
 - **Unlabelled-patch filtering.**  ``PatchConfig.min_fault_fraction`` lets
   you drop patches with fewer than a threshold fraction of fault voxels,
   which helps balance training on sparse fault labels.
@@ -136,10 +136,10 @@ class PatchDataset(Dataset):
     ----------
     seismic_zarr:
         Path to the seismic amplitude Zarr store (contains dataset ``amplitude``)
-        *or* an already-open ``zarr.Array``.
+        *or* an already-open ``zarr.Array`` / ``np.ndarray``.
     label_zarr:
         Path to the fault mask Zarr store (contains dataset ``fault_mask``)
-        *or* an already-open ``zarr.Array``.  Pass ``None`` to return
+        *or* an already-open ``zarr.Array`` / ``np.ndarray``.  Pass ``None`` to return
         all-zero labels (useful for unlabelled inference datasets).
     config:
         :class:`PatchConfig`.  Defaults to 64³ patches, full-stride.
@@ -154,8 +154,8 @@ class PatchDataset(Dataset):
 
     def __init__(
         self,
-        seismic_zarr: str | Path | zarr.Array,
-        label_zarr:   str | Path | zarr.Array | None,
+        seismic_zarr: str | Path | zarr.Array | np.ndarray,
+        label_zarr:   str | Path | zarr.Array | np.ndarray | None,
         config:        PatchConfig | None     = None,
         split:         Split                  = Split.TRAIN,
         transform:     Callable | None        = None,
@@ -275,8 +275,13 @@ class PatchDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 
-def _open_zarr_array(src: str | Path | zarr.Array, dataset_name: str) -> zarr.Array:
+def _open_zarr_array(
+    src: str | Path | zarr.Array | np.ndarray,
+    dataset_name: str,
+) -> zarr.Array | np.ndarray:
     """Open a named dataset from a Zarr store or pass through an existing Array."""
+    if isinstance(src, np.ndarray):
+        return src
     if isinstance(src, zarr.Array):
         return src
     root = zarr.open_group(str(src), mode="r")

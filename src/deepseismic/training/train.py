@@ -39,6 +39,7 @@ class TrainConfig:
     # Core training
     epochs: int = 20
     batch_size: int = 4
+    num_workers: int = 0
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     patch_size: tuple[int, int, int] = (32, 32, 32)
@@ -67,6 +68,7 @@ class TrainConfig:
 
     # S3-06: storage backend — "local" (default) | "azure" (ADLS via ABSZarrV3Store)
     storage_backend: str = "local"
+    cache_volume: bool | None = None
     # Azure ADLS container + prefix for each Zarr artifact.
     # Convention (infra #11): staged/surveys/{survey_id}/amplitude.zarr
     az_seismic_container: str = "staged"
@@ -544,16 +546,38 @@ def _build_zarr_loaders(
     seismic_arr: _zarr.Array = seismic_root["amplitude"]
     label_arr:   _zarr.Array = label_root["fault_mask"]
 
-    # Pass zarr.Array objects directly so PatchDataset doesn't re-open the store
+    seismic_data: _zarr.Array | np.ndarray = seismic_arr
+    label_data: _zarr.Array | np.ndarray = label_arr
+    if _should_cache_volume(config):
+        try:
+            seismic_data = np.ascontiguousarray(np.asarray(seismic_arr[:]))
+            label_data = np.ascontiguousarray(np.asarray(label_arr[:]))
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to cache zarr volumes into RAM. "
+                "Use --no-cache-volume to stream from storage instead."
+            ) from exc
+
+        logger.info(
+            "Cached amplitude %s %s (%.1f MB) + fault_mask %s %s (%.1f MB) into RAM",
+            "x".join(str(dim) for dim in seismic_data.shape),
+            seismic_data.dtype,
+            seismic_data.nbytes / (1024 * 1024),
+            "x".join(str(dim) for dim in label_data.shape),
+            label_data.dtype,
+            label_data.nbytes / (1024 * 1024),
+        )
+
+    # Pass opened arrays directly so PatchDataset doesn't re-open the store
     train_ds = PatchDataset(
-        seismic_arr,
-        label_arr,
+        seismic_data,
+        label_data,
         config=patch_cfg,
         split=Split.TRAIN,
     )
     val_ds = PatchDataset(
-        seismic_arr,
-        label_arr,
+        seismic_data,
+        label_data,
         config=patch_cfg,
         split=Split.VAL,
     )
@@ -571,7 +595,7 @@ def _build_zarr_loaders(
     n_fault_patches = 0
     for p in train_ds._patches:
         lbl_sum = int(
-            label_arr[
+            label_data[
                 p.il_start : p.il_start + ps[0],
                 p.xl_start : p.xl_start + ps[1],
                 p.s_start  : p.s_start  + ps[2],
@@ -598,12 +622,25 @@ def _build_zarr_loaders(
     )
 
     train_loader = DataLoader(
-        train_ds, batch_size=config.batch_size, sampler=sampler, num_workers=0
+        train_ds,
+        batch_size=config.batch_size,
+        sampler=sampler,
+        num_workers=config.num_workers,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=config.batch_size, shuffle=False, num_workers=0
+        val_ds,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
     )
     return train_loader, val_loader
+
+
+def _should_cache_volume(config: TrainConfig) -> bool:
+    """Return effective zarr volume caching decision."""
+    if config.cache_volume is not None:
+        return config.cache_volume
+    return config.storage_backend == "azure"
 
 
 def _build_synthetic_loaders(
@@ -642,10 +679,16 @@ def _build_synthetic_loaders(
     logger.info("Train patches: %d, Val patches: %d", len(train_ds), len(val_ds))
 
     train_loader = DataLoader(
-        train_ds, batch_size=config.batch_size, shuffle=True, num_workers=0
+        train_ds,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=config.batch_size, shuffle=False, num_workers=0
+        val_ds,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
     )
     return train_loader, val_loader
 
@@ -662,6 +705,10 @@ def main() -> None:
     parser.add_argument(
         "--batch-size", type=int, default=4,
         help="Batch size (default: 4)",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=0,
+        help="DataLoader worker count (default: 0)",
     )
     parser.add_argument(
         "--lr", type=float, default=1e-3,
@@ -731,6 +778,22 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--cache-volume",
+        dest="cache_volume",
+        action="store_true",
+        default=None,
+        help="Cache zarr amplitude and fault mask into RAM before training.",
+    )
+    parser.add_argument(
+        "--no-cache-volume",
+        dest="cache_volume",
+        action="store_false",
+        help=(
+            "Disable zarr volume RAM caching. Default is auto: on for azure, "
+            "off for local."
+        ),
+    )
+    parser.add_argument(
         "--az-seismic-container", default="staged",
         help="Azure container for seismic amplitude Zarr (default: staged)",
     )
@@ -759,6 +822,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    logging.getLogger("azure").setLevel(logging.WARNING)
 
     # Default pos_weight depends on data mode
     # zarr: neg/pos ≈ 1255, capped at 200 to avoid numeric instability
@@ -772,6 +836,7 @@ def main() -> None:
     config = TrainConfig(
         epochs=args.epochs,
         batch_size=args.batch_size,
+        num_workers=args.num_workers,
         learning_rate=args.lr,
         device=args.device,
         init_features=args.features,
@@ -784,6 +849,7 @@ def main() -> None:
         checkpoint_upload_prefix=args.checkpoint_upload_prefix,
         checkpoint_upload_container=args.checkpoint_upload_container,
         storage_backend=args.storage_backend,
+        cache_volume=args.cache_volume,
         az_seismic_container=args.az_seismic_container,
         az_seismic_prefix=args.az_seismic_prefix,
         az_label_container=args.az_label_container,

@@ -13,16 +13,21 @@ Integration-tagged tests use small in-memory numpy data only.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
 import torch.utils.data
+import zarr
 
 from deepseismic.training.train import (
     NumpyPatchDataset,
     TrainConfig,
     _accum_tp_fp_fn,
+    _build_zarr_loaders,
     _epoch_metrics,
+    _should_cache_volume,
     _upload_checkpoints,
 )
 
@@ -48,6 +53,58 @@ class TestTrainConfig:
         """Setting data_mode='zarr' must not raise (S2-02)."""
         cfg = TrainConfig(data_mode="zarr")
         assert cfg.data_mode == "zarr"
+
+    def test_cache_volume_defaults_to_azure_only(self):
+        """Auto cache policy must be on for azure and off for local."""
+        assert _should_cache_volume(TrainConfig(storage_backend="azure")) is True
+        assert _should_cache_volume(TrainConfig(storage_backend="local")) is False
+
+    def test_cache_volume_explicit_flags_win(self):
+        """Explicit cache_volume True/False overrides the backend default."""
+        assert _should_cache_volume(
+            TrainConfig(storage_backend="local", cache_volume=True)
+        ) is True
+        assert _should_cache_volume(
+            TrainConfig(storage_backend="azure", cache_volume=False)
+        ) is False
+
+    def test_zarr_loader_caches_arrays_when_enabled(self, monkeypatch):
+        """Cached zarr loaders should hand numpy arrays to PatchDataset."""
+        seismic = zarr.array(
+            np.ones((20, 4, 4), dtype=np.float32),
+            chunks=(5, 2, 2),
+        )
+        labels_np = np.zeros((20, 4, 4), dtype=np.uint8)
+        labels_np[0:2, 0:2, 0:2] = 1
+        labels = zarr.array(labels_np, chunks=(5, 2, 2))
+
+        def _fake_open_zarr_root(path, *, backend, az_container=None, az_prefix=None):
+            path_str = str(path)
+            if path_str == "labels":
+                return {"fault_mask": labels}
+            if path_str == "seismic":
+                return {"amplitude": seismic}
+            raise AssertionError(f"unexpected zarr path: {path}")
+
+        monkeypatch.setattr(
+            "deepseismic.storage.zarr_helpers.open_zarr_root",
+            _fake_open_zarr_root,
+        )
+
+        cfg = TrainConfig(
+            data_mode="zarr",
+            seismic_zarr=Path("seismic"),
+            label_zarr=Path("labels"),
+            patch_size=(2, 2, 2),
+            stride=(2, 2, 2),
+            cache_volume=True,
+        )
+        train_loader, val_loader = _build_zarr_loaders(cfg)
+
+        assert isinstance(train_loader.dataset._seismic, np.ndarray)
+        assert isinstance(train_loader.dataset._labels, np.ndarray)
+        assert isinstance(val_loader.dataset._seismic, np.ndarray)
+        assert isinstance(val_loader.dataset._labels, np.ndarray)
 
 
 # ---------------------------------------------------------------------------

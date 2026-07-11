@@ -16,9 +16,16 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 import zarr
 import zarr.storage
 
+from deepseismic.preprocessing.patches import (
+    PatchConfig,
+    PatchDataset,
+    Split,
+    _open_zarr_array,
+)
 from deepseismic.preprocessing.pipeline import (
     _dominant_frequency_hz,
     _wavelet_symmetry,
@@ -62,6 +69,38 @@ def small_amplitude_zarr(tmp_path):
     root = zarr.open_group(store, mode="w")
     root.create_array("amplitude", data=data, chunks=(5, 5, 32))
     return tmp_path / "amp.zarr"
+
+
+# ---------------------------------------------------------------------------
+# PatchDataset numpy pass-through
+# ---------------------------------------------------------------------------
+
+
+class TestPatchDatasetNumpyArrays:
+    """PatchDataset must support in-memory numpy arrays for cached zarr volumes."""
+
+    def test_open_zarr_array_passes_numpy_array_through(self):
+        arr = np.zeros((4, 4, 4), dtype=np.float32)
+        assert _open_zarr_array(arr, "amplitude") is arr
+
+    def test_patch_dataset_reads_numpy_arrays(self):
+        rng = np.random.default_rng(7)
+        seismic = rng.standard_normal((8, 8, 8)).astype(np.float32)
+        labels = (rng.random((8, 8, 8)) > 0.9).astype(np.uint8)
+        patch_size = (4, 4, 4)
+
+        ds = PatchDataset(
+            seismic,
+            labels,
+            config=PatchConfig(patch_size=patch_size, stride=patch_size),
+            split=Split.TRAIN,
+        )
+
+        seismic_t, label_t = ds[0]
+        assert seismic_t.shape == (1, *patch_size)
+        assert label_t.shape == (1, *patch_size)
+        assert seismic_t.dtype == torch.float32
+        assert label_t.dtype == torch.float32
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,8 @@ from torch.utils.data import DataLoader
 
 logger = logging.getLogger(__name__)
 
+VAL_THRESHOLD_GRID: tuple[float, ...] = tuple(float(t) for t in np.linspace(0.05, 0.95, 19))
+
 
 @dataclass
 class TrainConfig:
@@ -224,6 +226,20 @@ def _accum_tp_fp_fn(
     return tp, fp, fn
 
 
+def _accum_tp_fp_fn_from_probs(
+    probs: torch.Tensor,
+    targets: torch.Tensor,
+    threshold: float,
+) -> tuple[float, float, float]:
+    """Return (TP, FP, FN) counts from probabilities at one threshold."""
+    with torch.no_grad():
+        binary = (probs > threshold).float()
+        tp = (binary * targets).sum().item()
+        fp = (binary * (1.0 - targets)).sum().item()
+        fn = ((1.0 - binary) * targets).sum().item()
+    return tp, fp, fn
+
+
 def _epoch_metrics(tp: float, fp: float, fn: float) -> dict[str, float]:
     """Compute IoU and Dice from epoch-level TP/FP/FN accumulators (S2-08).
 
@@ -236,6 +252,98 @@ def _epoch_metrics(tp: float, fp: float, fn: float) -> dict[str, float]:
     precision = tp / (tp + fp + 1e-8)
     recall = tp / (tp + fn + 1e-8)
     return {"iou": iou, "dice": dice, "precision": precision, "recall": recall}
+
+
+def _average_precision_from_curve(
+    precision_by_threshold: list[float],
+    recall_by_threshold: list[float],
+) -> float:
+    """Approximate average precision from threshold-grid precision/recall points."""
+    best_precision_by_recall: dict[float, float] = {}
+    for precision, recall in zip(precision_by_threshold, recall_by_threshold, strict=True):
+        recall = float(np.clip(recall, 0.0, 1.0))
+        precision = float(np.clip(precision, 0.0, 1.0))
+        best_precision_by_recall[recall] = max(
+            precision,
+            best_precision_by_recall.get(recall, 0.0),
+        )
+
+    ap = 0.0
+    previous_recall = 0.0
+    for recall in sorted(best_precision_by_recall):
+        if recall > previous_recall:
+            ap += (recall - previous_recall) * best_precision_by_recall[recall]
+            previous_recall = recall
+    return float(np.clip(ap, 0.0, 1.0))
+
+
+def _sweep_threshold_metrics(
+    tp_by_threshold: list[float],
+    fp_by_threshold: list[float],
+    fn_by_threshold: list[float],
+    thresholds: tuple[float, ...] = VAL_THRESHOLD_GRID,
+) -> dict[str, float]:
+    """Return best-IoU validation metrics and grid-AP from threshold accumulators."""
+    if not (
+        len(thresholds)
+        == len(tp_by_threshold)
+        == len(fp_by_threshold)
+        == len(fn_by_threshold)
+    ):
+        raise ValueError("threshold and accumulator lengths must match")
+
+    metrics_by_threshold = [
+        _epoch_metrics(tp, fp, fn)
+        for tp, fp, fn in zip(tp_by_threshold, fp_by_threshold, fn_by_threshold, strict=True)
+    ]
+    best_idx = max(
+        range(len(thresholds)),
+        key=lambda idx: metrics_by_threshold[idx]["iou"],
+    )
+    best_metrics = dict(metrics_by_threshold[best_idx])
+    best_metrics["best_threshold"] = thresholds[best_idx]
+    best_metrics["ap"] = _average_precision_from_curve(
+        [m["precision"] for m in metrics_by_threshold],
+        [m["recall"] for m in metrics_by_threshold],
+    )
+    return best_metrics
+
+
+def _sweep_probs_metrics(
+    probs: torch.Tensor,
+    targets: torch.Tensor,
+    thresholds: tuple[float, ...] = VAL_THRESHOLD_GRID,
+) -> dict[str, float]:
+    """Compute best-IoU grid metrics for an already-sigmoided tensor."""
+    tp_by_threshold: list[float] = []
+    fp_by_threshold: list[float] = []
+    fn_by_threshold: list[float] = []
+    for threshold in thresholds:
+        tp, fp, fn = _accum_tp_fp_fn_from_probs(probs, targets, threshold)
+        tp_by_threshold.append(tp)
+        fp_by_threshold.append(fp)
+        fn_by_threshold.append(fn)
+    return _sweep_threshold_metrics(tp_by_threshold, fp_by_threshold, fn_by_threshold, thresholds)
+
+
+def _select_best_checkpoint(
+    val_metrics: dict[str, float],
+    best_val_iou: float,
+    best_val_loss: float,
+    best_saved: bool,
+) -> tuple[bool, str | None, float, float, bool]:
+    """Decide whether this epoch should write best.pt."""
+    selected_by: str | None = None
+    if val_metrics["iou"] > best_val_iou:
+        best_val_iou = val_metrics["iou"]
+        selected_by = "iou"
+        best_saved = True
+    elif not best_saved and val_metrics["loss"] < best_val_loss:
+        selected_by = "loss"
+        best_saved = True
+
+    best_val_loss = min(best_val_loss, val_metrics["loss"])
+    return selected_by is not None, selected_by, best_val_iou, best_val_loss, best_saved
 
 
 def _upload_checkpoints(config: TrainConfig) -> None:
@@ -320,10 +428,12 @@ def validate(
     device: torch.device,
     use_dice: bool = False,
 ) -> dict[str, float]:
-    """Run validation with epoch-level metric accumulation (S2-08)."""
+    """Run validation with epoch-level threshold-grid metric accumulation."""
     model.eval()
     total_loss = 0.0
-    total_tp = total_fp = total_fn = 0.0
+    tp_by_threshold = [0.0 for _ in VAL_THRESHOLD_GRID]
+    fp_by_threshold = [0.0 for _ in VAL_THRESHOLD_GRID]
+    fn_by_threshold = [0.0 for _ in VAL_THRESHOLD_GRID]
     n_batches = 0
 
     for seismic, labels in loader:
@@ -335,15 +445,20 @@ def validate(
         if use_dice:
             loss = 0.5 * loss + 0.5 * _dice_loss(logits, labels)
 
-        tp, fp, fn = _accum_tp_fp_fn(logits, labels)
-        total_tp += tp
-        total_fp += fp
-        total_fn += fn
+        probs = torch.sigmoid(logits)
+        for idx, threshold in enumerate(VAL_THRESHOLD_GRID):
+            tp, fp, fn = _accum_tp_fp_fn_from_probs(probs, labels, threshold)
+            tp_by_threshold[idx] += tp
+            fp_by_threshold[idx] += fp
+            fn_by_threshold[idx] += fn
         total_loss += loss.item()
         n_batches += 1
 
     avg_loss = total_loss / max(n_batches, 1)
-    return {"loss": avg_loss, **_epoch_metrics(total_tp, total_fp, total_fn)}
+    return {
+        "loss": avg_loss,
+        **_sweep_threshold_metrics(tp_by_threshold, fp_by_threshold, fn_by_threshold),
+    }
 
 
 def train(config: TrainConfig) -> Path:
@@ -404,6 +519,11 @@ def train(config: TrainConfig) -> Path:
 
     # Training loop
     best_val_iou = 0.0
+    best_val_loss = float("inf")
+    best_val_ap = 0.0
+    best_threshold = 0.5
+    best_saved = False
+    best_selected_by: str | None = None
     best_checkpoint = config.checkpoint_dir / "best.pt"
 
     # Val metrics from last epoch (used for final checkpoint save below loop)
@@ -412,9 +532,9 @@ def train(config: TrainConfig) -> Path:
     print(
         f"\n{'Epoch':>5} {'Train Loss':>11} {'Val Loss':>9} "
         f"{'Train IoU':>10} {'Val IoU':>8} {'Val Dice':>9} "
-        f"{'LR':>10}"
+        f"{'Val AP':>8} {'Thr':>5} {'LR':>10}"
     )
-    print("-" * 72)
+    print("-" * 88)
 
     for epoch in range(1, config.epochs + 1):
         train_metrics = train_epoch(
@@ -431,14 +551,26 @@ def train(config: TrainConfig) -> Path:
             f"{train_metrics['iou']:>10.4f} "
             f"{val_metrics['iou']:>8.4f} "
             f"{val_metrics['dice']:>9.4f} "
+            f"{val_metrics['ap']:>8.4f} "
+            f"{val_metrics['best_threshold']:>5.2f} "
             f"{lr:>10.2e}"
         )
 
         # Save best checkpoint with REAL metrics (S2-08) + config+seed (S2-05)
-        if val_metrics["iou"] > best_val_iou:
-            best_val_iou = val_metrics["iou"]
+        (
+            should_save_best,
+            selected_by,
+            best_val_iou,
+            best_val_loss,
+            best_saved,
+        ) = _select_best_checkpoint(val_metrics, best_val_iou, best_val_loss, best_saved)
+        if should_save_best:
+            best_val_ap = val_metrics["ap"]
+            best_threshold = val_metrics["best_threshold"]
+            best_selected_by = selected_by
             ckpt_payload = {
                 **val_metrics,
+                "selected_by": selected_by,
                 "seed": config.seed,
                 "train_config": config_dict,
             }
@@ -459,6 +591,7 @@ def train(config: TrainConfig) -> Path:
     final_ckpt = config.checkpoint_dir / "latest.pt"
     final_payload = {
         **val_metrics,
+        "selected_by": "latest",
         "seed": config.seed,
         "train_config": config_dict,
     }
@@ -466,7 +599,22 @@ def train(config: TrainConfig) -> Path:
         str(final_ckpt), epoch=config.epochs, metrics=final_payload
     )
 
-    print(f"\nTraining complete. Best val IoU: {best_val_iou:.4f}")
+    config_dict.update(
+        {
+            "best_val_iou": best_val_iou,
+            "best_val_ap": best_val_ap,
+            "best_threshold": best_threshold,
+            "best_selected_by": best_selected_by,
+        }
+    )
+    with open(run_config_path, "w") as fh:
+        json.dump(config_dict, fh, indent=2, default=str)
+
+    print(
+        f"\nTraining complete. Best val IoU: {best_val_iou:.4f}  "
+        f"Best val AP: {best_val_ap:.4f}  Threshold: {best_threshold:.2f}"
+    )
+    print(f"   Best selected by: {best_selected_by}")
     print(f"   Best checkpoint: {best_checkpoint}")
     print(f"   Latest checkpoint: {final_ckpt}")
     print(f"   Run config: {run_config_path}")

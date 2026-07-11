@@ -22,12 +22,15 @@ import torch.utils.data
 import zarr
 
 from deepseismic.training.train import (
+    VAL_THRESHOLD_GRID,
     NumpyPatchDataset,
     TrainConfig,
     _accum_tp_fp_fn,
     _build_zarr_loaders,
     _epoch_metrics,
+    _select_best_checkpoint,
     _should_cache_volume,
+    _sweep_probs_metrics,
     _upload_checkpoints,
 )
 
@@ -294,6 +297,8 @@ class TestEpochMetrics:
         m = _epoch_metrics(tp=0.0, fp=0.0, fn=0.0)
         assert m["iou"] == pytest.approx(0.0, abs=1e-5)
         assert m["dice"] == pytest.approx(0.0, abs=1e-5)
+        assert m["precision"] == pytest.approx(0.0, abs=1e-5)
+        assert m["recall"] == pytest.approx(0.0, abs=1e-5)
 
     def test_all_metrics_bounded_0_to_1(self):
         """IoU and Dice must always lie in [0, 1] for non-negative inputs."""
@@ -302,6 +307,79 @@ class TestEpochMetrics:
             m = _epoch_metrics(float(tp), float(fp), float(fn))
             assert 0.0 <= m["iou"] <= 1.0 + 1e-8, f"IoU out of range for {tp},{fp},{fn}"
             assert 0.0 <= m["dice"] <= 1.0 + 1e-8, f"Dice out of range for {tp},{fp},{fn}"
+
+
+# ---------------------------------------------------------------------------
+# Validation threshold sweep / best-checkpoint selection
+# ---------------------------------------------------------------------------
+
+
+class TestValidationThresholdSweep:
+    """Tests for swept validation metrics used by train.validate."""
+
+    def test_threshold_sweep_finds_lower_threshold_signal(self):
+        """A model with probabilities below 0.5 can still score true positives."""
+        probs = torch.tensor([0.40, 0.35, 0.01, 0.02])
+        targets = torch.tensor([1.0, 1.0, 0.0, 0.0])
+
+        metrics = _sweep_probs_metrics(probs, targets)
+
+        assert metrics["iou"] > 0.0
+        assert metrics["best_threshold"] < 0.5
+        assert metrics["best_threshold"] in VAL_THRESHOLD_GRID
+
+    def test_grid_average_precision_is_one_for_separable_probs(self):
+        """Perfectly separated positives/negatives should have AP near 1."""
+        probs = torch.tensor([0.90, 0.80, 0.10, 0.05])
+        targets = torch.tensor([1.0, 1.0, 0.0, 0.0])
+
+        metrics = _sweep_probs_metrics(probs, targets)
+
+        assert metrics["ap"] == pytest.approx(1.0, abs=1e-5)
+
+    def test_grid_average_precision_degenerate_case_is_finite(self):
+        """No positive predictions across the grid should produce AP=0, not NaN."""
+        probs = torch.zeros(4)
+        targets = torch.tensor([1.0, 1.0, 0.0, 0.0])
+
+        metrics = _sweep_probs_metrics(probs, targets)
+
+        assert metrics["ap"] == pytest.approx(0.0, abs=1e-5)
+        assert np.isfinite(metrics["ap"])
+
+
+class TestBestCheckpointSelection:
+    """Tests for robust best.pt selection when swept IoU remains zero."""
+
+    def test_fallback_saves_first_best_by_loss_when_iou_is_zero(self):
+        """The first zero-IoU epoch still writes best.pt using the loss fallback."""
+        should_save, selected_by, best_iou, best_loss, best_saved = _select_best_checkpoint(
+            {"iou": 0.0, "loss": 0.75},
+            best_val_iou=0.0,
+            best_val_loss=float("inf"),
+            best_saved=False,
+        )
+
+        assert should_save is True
+        assert selected_by == "loss"
+        assert best_iou == pytest.approx(0.0)
+        assert best_loss == pytest.approx(0.75)
+        assert best_saved is True
+
+    def test_iou_improvement_takes_primary_precedence(self):
+        """Any strict IoU improvement writes best.pt and marks the reason as IoU."""
+        should_save, selected_by, best_iou, best_loss, best_saved = _select_best_checkpoint(
+            {"iou": 0.10, "loss": 0.90},
+            best_val_iou=0.0,
+            best_val_loss=1.00,
+            best_saved=True,
+        )
+
+        assert should_save is True
+        assert selected_by == "iou"
+        assert best_iou == pytest.approx(0.10)
+        assert best_loss == pytest.approx(0.90)
+        assert best_saved is True
 
 
 # ---------------------------------------------------------------------------

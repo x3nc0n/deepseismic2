@@ -381,6 +381,43 @@ class TestBestCheckpointSelection:
         assert best_loss == pytest.approx(0.90)
         assert best_saved is True
 
+    def test_fallback_updates_best_on_subsequent_loss_improvement_when_iou_zero(self):
+        """After epoch 1 saves via loss-fallback, epoch 2 with lower loss must ALSO update.
+
+        Regression guard for issue #37: the original `not best_saved` condition only
+        captured the first epoch (essentially a 'first-epoch' fallback, not a
+        'best-by-loss' fallback).  With best_saved=True and IoU stuck at 0, a later
+        epoch that achieves lower validation loss must still overwrite best.pt.
+        """
+        # Simulate epoch 2: best_saved=True (epoch 1 saved via loss), IoU still 0
+        should_save, selected_by, best_iou, best_loss, best_saved = _select_best_checkpoint(
+            {"iou": 0.0, "loss": 0.55},  # better loss than epoch-1's 0.75
+            best_val_iou=0.0,
+            best_val_loss=0.75,           # epoch 1 set this
+            best_saved=True,
+        )
+
+        assert should_save is True, "epoch-2 with lower loss must overwrite best.pt"
+        assert selected_by == "loss"
+        assert best_loss == pytest.approx(0.55)
+        assert best_saved is True
+
+    def test_fallback_does_not_overwrite_better_iou_checkpoint_with_lower_loss(self):
+        """Loss fallback must NOT fire when IoU has regressed below the saved best.
+
+        If epoch 5 had IoU=0.3 (saved as best.pt) and epoch 6 has IoU=0.2 with
+        a better loss, the IoU-regression guard must prevent overwriting.
+        """
+        should_save, selected_by, best_iou, best_loss, best_saved = _select_best_checkpoint(
+            {"iou": 0.2, "loss": 0.30},  # worse IoU, better loss
+            best_val_iou=0.3,             # epoch 5 was better
+            best_val_loss=0.50,
+            best_saved=True,
+        )
+
+        assert should_save is False, "must not overwrite a better-IoU checkpoint with loss alone"
+        assert selected_by is None
+
 
 # ---------------------------------------------------------------------------
 # Seed determinism (S2-05)

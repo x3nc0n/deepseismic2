@@ -338,7 +338,12 @@ def _select_best_checkpoint(
         best_val_iou = val_metrics["iou"]
         selected_by = "iou"
         best_saved = True
-    elif not best_saved and val_metrics["loss"] < best_val_loss:
+    elif val_metrics["iou"] >= best_val_iou and val_metrics["loss"] < best_val_loss:
+        # Loss fallback: fires whenever IoU hasn't regressed AND loss improved.
+        # Guarantees best.pt always tracks the lowest-loss checkpoint in the
+        # all-zero-IoU regime (e.g. issue #37 cross-survey F3 run), not just
+        # the first epoch. The `>= best_val_iou` guard prevents overwriting a
+        # higher-IoU checkpoint with a lower-loss but lower-IoU one.
         selected_by = "loss"
         best_saved = True
 

@@ -42,199 +42,54 @@
 
 ## Learnings
 
-### 2026-06-09 — Local dev environment and storage abstraction layer
+## Learnings
 
-**What was built:**
-- `src/deepseismic/storage/blob_client.py` — Full `StorageClient` + `ABSZarrStore`
-- `src/deepseismic/storage/config.py` — `pydantic-settings` `Settings` singleton
-- `docker/docker-compose.yml` — Azurite service (default) + API service (--profile full)
-- `docker/Dockerfile` — Multi-stage build (builder + least-privilege runtime)
-- `scripts/setup-local.ps1` — One-shot Windows setup: Docker check → Azurite → containers → sample data
-- `.env.example` — All env vars with local-dev defaults pre-filled
-- `src/deepseismic/api/main.py` — Minimal FastAPI app with `/health` endpoint
+### Release Convention & Deployment Pattern (Consolidated)
+- chore(release) commits go directly to main (not via PR). Code-fix PRs squash-merge.
+- Version bump only touches pyproject.toml. Historical narrative in agent histories is NOT updated during release.
+- GitHub release: gh release create {tag} --repo x3nc0n/deepseismic2 --title "..." --notes "..."
+- CD behavior: Pushing pyproject.toml change to main triggers cd.yml (status in-progress within ~24s). CD ignores .md/docs/**/.squad/**.
+- Infra coordination: Use here-strings (@"..."@) to avoid PowerShell escaping issues with backticks/special chars.
+- Pre-flight: git status before version bump to catch unstaged files not mentioned in task brief.
 
-**Architecture patterns:**
-- `StorageClient` auto-detects: `STORAGE_CONNECTION_STRING` → connection string; `AZURE_STORAGE_ACCOUNT` → `DefaultAzureCredential`.  No other code path needed.
-- `ABSZarrStore` is a `MutableMapping` wrapping `ContainerClient`.  Works with zarr 2.x and 3.x without `adlfs`/`fsspec[azure]` — avoids an extra dependency.
-- `get_settings()` is `@lru_cache(maxsize=1)` — singleton, test-friendly via `get_settings.cache_clear()`.
-- Docker compose `azurite` service has a healthcheck; `api` service depends on it via `condition: service_healthy`.
-- API service is behind `--profile full` so `docker compose up` only starts Azurite by default (cheaper).
+### Gradio Dependency Pinning Foot-Gun (Critical Pattern)
+**Problem:** pyproject.toml [ui] pinned gradio>=4.40.0 (no upper bound). docker/Dockerfile.gradio had bare pip install gradio that overrode pyproject constraint and pulled gradio 6.17.3 at build time.
 
-**Key file paths:**
-- Storage client: `src/deepseismic/storage/blob_client.py`
-- Config/settings: `src/deepseismic/storage/config.py`
-- Compose file: `docker/docker-compose.yml`
-- Dockerfile: `docker/Dockerfile`
-- Setup script: `scripts/setup-local.ps1`
-- Env template: `.env.example`
+**Gradio 6 breaking changes:**
+- gr.Chatbot(type="messages") kwarg removed → TypeError at module import (fatal)
+- gr.Blocks(theme=..., css=...) args removed → silently ignored on gradio 6 (design lost)
 
-**Dependency added:** `pydantic-settings>=2.3.0` — required for `BaseSettings` in pydantic v2.
+**Fix:** gradio>=4.44.0,<6 (4.44 is baseline for 	ype="messages"; <6 ceiling enforces API compatibility).
 
-**Cost notes:**
-- Azurite connection string defaults mean zero Azure spend during local dev.
-- Standard LRS chosen for cloud (cheapest redundancy tier for PoC).
-- `list_blobs` is a metadata-only call — no data egress cost.
+**Principle:** Dockerfile explicit pip install alongside a .[extra] install wins the version race when there is no lock file. Never duplicate package installs in Dockerfile; let pyproject.toml constraints govern. Documented in .squad/skills/dockerfile-dep-pinning/SKILL.md.
 
+### HNS Prefix Resolution Pattern (Issue #26 Fix)
+Root cause: list_blobs(name_starts_with=...) returns nothing or raises on ADLS Gen2 HNS containers. Silent xcept swallowed errors → 404 on valid prefixes.
 
-## Scribe Cross-Agent Update — 2026-06-10T04:30-05:00
-Sprint 1 coordination complete. All agents delivered successfully.
-- 5 agents synchronized
-- 7 decision documents archived
-- Full team context available in decisions.md
+Fix pattern:
+1. catalog/interpretation/index.json — JSON list of all full run ids, maintained by _catalog_index_append() (read-modify-write at submit time)
+2. _resolve_run_id() step 3: Read index via download_blob (exact, HNS-safe) before falling back to list_blobs (now logs WARNING)
+3. Pending status.json manifest written in un_fault_detection BEFORE background task fires → full id is durably resolvable cross-replica immediately after submission
 
-## Scribe Cross-Agent Update — 2026-06-24T12:41:40-05:00
+Key files: src/deepseismic/api/routes/interpretation.py (_CATALOG_INDEX_BLOB constant, _resolve_run_id, _catalog_index_append, run_fault_detection), src/tests/test_api/test_resolve_run_id.py (12 focused tests). PR #28.
 
-Phase 1 (Real Fault Viewer) complete. Infra deployment follow-up required:
-- **For Phase 2:** Deploy updated Streamlit UI + updated FastAPI backend to hosted demo.
-- **New artifacts to stage:** Baked fault probability Zarr volumes (ault_prob.zarr, ault_mask.zarr) must be available at deployment time alongside amplitude volumes in cloud storage.
-- **Deployment scope:** Copy Phase 1 code changes (src/, scripts/) to infra repo; verify bake script runs successfully in deployment environment; stage checkpoint (checkpoints/latest.pt) and baked Zarr output to blob storage before demo launch.
-- **No infrastructure changes:** Compute size, storage tier, Container Apps config remain unchanged. This is a data/code update, not an infra scaling event.
-- **Timeline:** Deploy after Phase 1 feature PR merges and tests pass.
+### API De-Mock Pattern (Sprint 3 — Fail-Loud Readiness)
+Mock mode is now opt-in (DEEPSEISMIC_MOCK_MODE=true); real mode is robust default.
 
-## Learnings — 2026-06-25T09:34:00-05:00 — Sprint 3 issue #9: De-mock the API critical path
+**Changes:**
+- StorageClient.__init__ exceptions now propagate (no silent except) with clear logging
+- get_storage_client() FastAPI dependency catches exception and surfaces as HTTP 503
+- health() endpoint: status = liveness (always "ok" when process alive); storage field = real readiness ("mock" | "ok" | "unreachable" | "error")
+- All route mock guards: if is_mock_mode() or storage is None: → if is_mock_mode(): (storage cannot be None in real mode)
+- Silent fallbacks removed: xcept Exception: return _mock_*() → aise HTTPException(503, ...)
 
-### What changed
+**Key facts:**
+- StorageClient construction is O(1), never network calls → lru_cache does NOT cache exceptions, retries on next call
+- Catalog index, pending manifest, survey_id in sidecar all follow this pattern: fail-loud, explicit, traceable
 
-**`src/deepseismic/api/dependencies.py`**
-- `_build_storage_client()`: removed silent `except Exception: return None`. In real mode, if `StorageClient()` raises (e.g. no env credentials), the exception now propagates with a clear log message. `lru_cache` does not cache exceptions so the next call retries (construction is cheap — no network calls made at build time).
-- `get_storage_client()` FastAPI dependency: catches the raised exception and surfaces it as HTTP 503. Routes in real mode will never receive `None` storage — they either get a client or get a 503 before their handler is called.
-- Added `logging` import; added `HTTPException` import.
-
-**`src/deepseismic/api/main.py`**
-- `lifespan()`: wrapped `_build_storage_client()` call in try/except so startup failure logs clearly but does not crash the process.
-- `health()`: fully rewritten. `status` is always `"ok"` (liveness — process alive). `storage` field reports real readiness: `"mock"` | `"ok"` | `"unreachable"` | `"error"`. Does a lightweight `list_blobs("catalog", max_results=1)` ping in real mode to confirm reachability. `storage_error` field added when something is wrong.
-
-**`src/deepseismic/api/routes/interpretation.py`**
-- All four route mock guards: `if is_mock_mode() or storage is None:` → `if is_mock_mode():`. In real mode, `storage is None` cannot happen (dependency raises 503 instead).
-
-**`src/deepseismic/api/routes/surveys.py`**
-- Same fix on all five mock guards. Additionally: the `except Exception: return _mock_survey_list()` silent fallback in `list_surveys` is now `raise HTTPException(503, ...)` — real mode storage errors are no longer hidden.
-
-**`src/deepseismic/api/routes/wells.py`**
-- Same fix on three mock guards. `except Exception: return _mock_well_list()` is now `raise HTTPException(503, ...)`.
-
-**`src/deepseismic/api/routes/browse.py`**
-- `browse_container`: `if is_mock_mode() or storage is None:` → `if is_mock_mode():`.
-
-### Mock→real default decision
-
-Real mode is now robust-default: a properly configured deployment (Azurite or cloud) takes the real code path. Mock data is only served when `DEEPSEISMIC_MOCK_MODE=true` is explicitly set. Missing/broken storage config causes 503, not silent canned data.
-
-### Gotchas
-
-- `StorageClient.__init__` parses env vars only — no network calls. Construction rarely fails; it only raises if *both* `STORAGE_CONNECTION_STRING` and `AZURE_STORAGE_ACCOUNT` are absent. Actual storage reachability errors surface at the first blob operation.
-- `lru_cache` does NOT cache exceptions in Python, so `_build_storage_client()` retries on every request if configuration is broken. Acceptable since construction is O(1) and encourages fast recovery once env vars are fixed.
-- The e2e smoke test `test_04_api_health` expects `status == "ok"` — kept by keeping `status` as a pure liveness field (always "ok" when process is alive).
-- Container name contract respected: `raw`, `staged`, `results`, `catalog`, `features` — unchanged.
-
-## Learnings — 2026-06-25 — Sprint 3 BUG-1: survey_id missing from catalog sidecar
-
-### What changed
-
-**`src/deepseismic/api/routes/surveys.py` — `_run_ingest()` line 181**
-- `ldr.to_zarr(zarr_path, overwrite=True)` was missing the `survey_id` keyword argument.
-- Fixed to: `ldr.to_zarr(zarr_path, overwrite=True, survey_id=req.survey_id)`.
-- Without this, `meta.survey_id` was always `None` in the uploaded `catalog/surveys/{survey_id}/metadata.json` sidecar.
-
-**`src/tests/test_api/test_api_real_mode.py` — `test_run_ingest_catalog_metadata_is_valid_json`**
-- Updated test now asserts `meta["survey_id"] == survey_id` instead of documenting the bug with a comment.
-- All pre-existing assertions (geometry, amplitude_stats, ingested_at) kept intact.
-
-### Key fact
-`SEGYLoader.to_zarr()` accepts a `survey_id: str | None = None` keyword parameter (added Sprint 3 Wave 1 by Dallas). Always pass `survey_id=req.survey_id` when calling it from `_run_ingest` so the sidecar is self-describing.
-
-
-## Sprint 3 — De-Mock + Real-Data Readiness (2026-06-25)
-
-Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with production data pipelines. All integration tests passing (292/296).
-
-**Completed:**
-- De-mock: fail-loud 503 handling, AZURE_PROJECT_ENDPOINT validation
-- Real data: ST10010 geometry, survey_id integration
-- Dense labels: densify + interpolation (0.30% synthetic)
-- Integration tests: 69 new (292 total)
-- Docs: README, real-data-runbook, task-framing
-
-**Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
-
-
-- **2026-06-29 (Ripley triage — issue #26):** Assigned to Parker — run lookup by short id-prefix 404s on ADLS/HNS. p1 with workaround. Prefix resolution bug in _resolve_run_id().
-
-## Learnings — 2026-06-29 — Issue #26: HNS list_blobs fragility + catalog index pattern
-
-### Root cause
-`_resolve_run_id()` step 3 used `list_blobs('catalog', 'interpretation/')` to enumerate blobs for prefix matching. On ADLS Gen2 HNS containers, `ContainerClient.list_blobs(name_starts_with=...)` returns nothing or raises. A bare `except Exception: pass` silently swallowed the error → 404 on valid prefix even though the run existed.
-
-### Fix pattern: catalog index.json + pending manifest
-
-**`catalog/interpretation/index.json`** — a JSON list of all full run ids. Maintained by `_catalog_index_append()` (read-modify-write at submit time). `_resolve_run_id` step 3 now reads the index via `download_blob` (exact, HNS-safe) before falling back to `list_blobs`. `list_blobs` kept as fallback for pre-index runs, but now logs a WARNING.
-
-**Pending `status.json` manifest** written in `run_fault_detection` BEFORE the background task fires so the full id is durably resolvable cross-replica immediately after submission.
-
-### Key file/line locations
-- `src/deepseismic/api/routes/interpretation.py`
-  - `_CATALOG_INDEX_BLOB` constant (module level)
-  - `_catalog_index_append()` — read-modify-write index helper
-  - `_resolve_run_id()` — step 3a (index scan), 3b (list_blobs fallback with WARNING)
-  - `run_fault_detection()` — pending manifest write + index append (before `background_tasks.add_task`)
-- `src/tests/test_api/test_resolve_run_id.py` — 12 focused tests for this fix
-
-### Design notes
-- Index is append-only, best-effort — a write failure logs a warning but never blocks job submission.
-- `list_blobs` fallback is only attempted when index scan yields no matches — avoids HNS errors on the hot path.
-- Pending manifest at submit means step 2 (exact download) also works for the full id immediately — redundant with the index but provides defense-in-depth across replicas.
-- PR: https://github.com/x3nc0n/deepseismic2/pull/28
-
-## Scribe Cross-Agent Update — 2026-07-09T22:43:22Z
-
-**F3 Training Data: External Sourcing Required**
-
-Cross-survey training run blocked until F3 data is externally sourced. Issue #31 investigation confirms: real F3 data NOT present in repo (only synthetic proxy). Must ingest from public **OpendTect F3 Demo** (dGB Earth Sciences / TerraNubis, CC BY-SA). Existing `scripts/download_f3.py` documents the acquisition contract. Use `parse_opendtect_fault_sticks` parser (not Petrel).
-
-**Leakage Gate (Hard Rule):** F3 = training input only; Volve = scoring/evaluation target only (issue #24). No cross-survey contamination.
-
-**Geometry:** IL 100–750, XL 300–1250, ~462 samples @ 4ms.
-
-**T4 Compute:** GPU workload profile provisioned (Spava-Corp/deepseismic2-infra#23). Data staging must complete before T4 training run.
-
-**Decision:** `.squad/decisions.md` — F3 Ingest Contract (approved/in-progress).
-
-## Learnings — 2026-07-14 — v0.8.1 Release: gradio-6 pin fix (latent dep bug in v0.8.0)
-
-### Root cause
-`pyproject.toml` [ui] extra pinned `gradio>=4.40.0` with **no upper bound**. `docker/Dockerfile.gradio` had a second unpinned `pip install gradio ...` line that overrode whatever `.[ui]` installed and resolved the **latest gradio (6.17.3)** at container build time.
-
-gradio 6 removed two APIs the app uses:
-- `gr.Chatbot(type="messages")` → `TypeError` on gradio 6 (`type=` kwarg removed). **Fatal** — crashes at module import since `demo` Blocks is built at import time.
-- `gr.Blocks(theme=..., css=...)` → silently ignored on gradio 6 (these args moved to `launch()`). **Silent data loss** — v0.8.0 UI redesign (theme + `_CUSTOM_CSS`) would never render.
-
-### Fix
-1. `pyproject.toml`: `gradio>=4.40.0` → `gradio>=4.44.0,<6` (4.44 is where `type="messages"` is solid; `<6` ceiling keeps us on the gradio 4/5 API the app targets).
-2. `docker/Dockerfile.gradio`: dropped bare `gradio` from the extra `pip install` line; `.[ui]` already installs the version-pinned gradio. `matplotlib` and `pillow` retained.
-
-### Verification (gradio 5.50.0)
-- `python -c "import deepseismic.ui.gradio_app; print('UI import OK')"` → clean, no errors or warnings
-- 391 passed, 2 skipped (non-integration pytest) ✅
-- ruff clean ✅
-
-### Foot-gun note
-**Dockerfile explicit `pip install <pkg>` lines alongside a `.[extra]` install are a foot-gun** when there is no lock file: they silently win the version race and can pull a major-version bump the pyproject constraint was never meant to allow. Always let the `pyproject.toml` bound govern; don't duplicate package installs in the Dockerfile.
-
-## Learnings — 2026-07-13 — v0.7.3 Release (Issue #37 — best-checkpoint loss-fallback fix)
-
-### Release steps that worked
-
-1. **Pre-flight:** `git status` revealed one unstaged file (`.squad/agents/hudson/history.md`) not mentioned in the task brief. Committed it separately as `docs(squad): hudson review notes for v0.7.3 best-checkpoint fix` before the version bump to keep history clean.
-2. **Version bump:** Only `pyproject.toml` needed bumping (0.7.2 → 0.7.3). The other `0.7.2` occurrences in Dallas's history.md were historical narrative — correctly left unchanged.
-3. **Version bump commit:** `chore(release): v0.7.3 — best-checkpoint loss-fallback fix (#37)` — matches prior `chore(release)` convention on main.
-4. **Land path:** DIRECT PUSH to `main`. `git pull --ff-only origin main` → already up to date → `git push origin main` succeeded (no branch protection blocking direct push for chore/release commits).
-5. **GitHub release:** `gh release create v0.7.3 --repo x3nc0n/deepseismic2 --title "..." --notes "..."` — succeeded immediately.
-6. **CD behavior:** Pushing `pyproject.toml` change to `main` triggered `cd.yml` immediately (status: `in_progress` within ~24s of push). CD ignores `.md`/`docs/**`/`.squad/**` — the `pyproject.toml` + `train.py` changes are what trigger it.
-7. **Infra coordination:** `gh issue comment 19 --repo Spava-Corp/deepseismic2-infra --body $body` — the `--body` flag with inline quoted string fails on PowerShell when body contains backticks/special chars. Use a here-string (`$body = @"..."@`) assigned to a variable, then pass `$body`.
-
-### Key decisions
-- `chore(release)` commits go directly to `main` (not via PR). Code-fix PRs squash-merge.
-- Infra coordination issue is `Spava-Corp/deepseismic2-infra#19` (not #21 or #23).
-- Infra re-run request: specify new `--checkpoint-upload-prefix` with a new run-id, same training flags otherwise.
-- Do NOT close app issue until infra posts re-run metrics (feeds #24).
-
+### F3 Ingest & Data Leakage Gate (Cross-Survey Boundary)
+- F3 data is training input ONLY; Volve data is scoring/evaluation target only (issue #24 hard rule)
+- NO cross-survey contamination allowed
+- F3 geometry: IL 100–750, XL 300–1250, ~462 samples @ 4ms
+- T4 compute GPU workload profile provisioned (Spava-Corp/deepseismic2-infra#23)
+- Decision: .squad/decisions.md — F3 Ingest Contract (approved/in-progress)

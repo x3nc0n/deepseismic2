@@ -48,3 +48,27 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 **Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
 
+## Learnings — v0.7.2 Fix Verification (2026-07-13)
+
+### Issue #37 Root Cause and v0.7.2 Fix
+- **Root cause:** `validate()` used a hardcoded 0.5 threshold on the ~97%-background F3 distribution → IoU=0 every epoch. `best.pt` saved only on IoU improvement → nothing ever saved in 50 epochs.
+- **v0.7.2 ships:** `src/deepseismic/training/train.py` — `validate()` now accumulates tp/fp/fn at 19 thresholds (0.05–0.95) via `_accum_tp_fp_fn_from_probs`, then calls `_sweep_threshold_metrics` to compute IoU@best-threshold + AP.
+- **Key functions:** `VAL_THRESHOLD_GRID` (19-point linspace), `_accum_tp_fp_fn_from_probs`, `_sweep_threshold_metrics`, `_average_precision_from_curve`, `_select_best_checkpoint`, `_sweep_probs_metrics`.
+- **`best_threshold` / `best_val_iou` / `best_val_ap` persisted** to both `best.pt` checkpoint payload and `run_config.json` (end of `train()`).
+- **Leakage gate:** Structural only — no explicit survey_id assert in training code; F3-only guarantee relies on configuring correct zarr paths. Volve defaults exist in `TrainConfig` but are overridden by CLI args for F3 runs.
+
+### Bug Found and Fixed (commit 1d184c6)
+- **Bug:** `_select_best_checkpoint` fallback condition `not best_saved and val_metrics["loss"] < best_val_loss` only fired once (epoch 1). In the all-zero-IoU case (50 epochs), best.pt = epoch-1 checkpoint, NOT the best-loss checkpoint.
+- **Fix:** Changed to `val_metrics["iou"] >= best_val_iou and val_metrics["loss"] < best_val_loss`. This fires on every epoch where IoU hasn't regressed AND loss improved, giving true best-by-loss tracking while protecting higher-IoU checkpoints from being overwritten.
+- **Tests added:** `test_fallback_updates_best_on_subsequent_loss_improvement_when_iou_zero` and `test_fallback_does_not_overwrite_better_iou_checkpoint_with_lower_loss`.
+
+### De-risk Result (synthetic)
+- Synthetic sparse-positive (3% faults, probs 0.35 on faults vs 0.02 on background): IoU@0.5 = 0.0000, IoU@best-thr (0.05) = 1.0000. Confirms the sweep fix resolves the zero-IoU symptom.
+
+### Test Coverage (post-fix)
+- 389 passed / 2 skipped, ruff clean. All 5 spec items covered by tests; 2 new tests close the loss-fallback gap.
+
+### Key File Paths
+- Training: `src/deepseismic/training/train.py` — `validate()`, `_sweep_threshold_metrics`, `_select_best_checkpoint`
+- Tests: `src/tests/test_training/test_sprint2_training.py` — `TestValidationThresholdSweep`, `TestBestCheckpointSelection`
+

@@ -90,3 +90,23 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 **Outcomes:** 292 passed / 2 skipped (unit), 4 passed / 5 skipped (integration), ruff clean, v0.4.0 released.
 
+## Learnings — 2026-07-13 (Issue #37 Metric Review)
+
+- **Metric adequacy (Issue #37):** At ~0.08% positive prevalence, **AP (PR-AUC) is the primary ranking metric**; IoU@best-threshold is a useful secondary but is fragile to label-dilation mismatch. A global threshold sweep (0.05–0.95) is appropriate for a PoC; depth-dependent thresholding is a production refinement only.
+
+- **Label uncertainty caveat:** F3 fault picks are interpreter selections on coherence/similarity attributes; the model trains on amplitude. Any prediction within ~1–2 voxels of a pick is geophysically correct but binary IoU penalizes it identically to a remote false positive. IoU numbers therefore systematically understate model quality.
+
+- **Credible F3 target ranges (issue #37):**
+  - Broken / degenerate: val AP < 0.05, IoU@best-T essentially 0 (no threshold improves on all-background)
+  - Clearly learning: val AP 0.10–0.20, IoU@best-T 0.03–0.10
+  - Competent PoC: val AP 0.20–0.45, IoU@best-T 0.10–0.25
+  - Publishable / near-SOTA: val AP > 0.45, IoU@best-T > 0.25 (consistent with published F3 fault detection literature using supervision)
+
+- **Key gotchas for this codebase:**
+  1. Dilation=3 (7-voxel-wide labels) makes diffuse predictions look geometrically good; tighten dilation at evaluation time to expose model sharpness.
+  2. F3 inline spatial split may put all of a particular fault's cross-cutting structure in one partition — the split creates easy-then-hard or hard-then-easy gradients depending on the geometry.
+  3. OpendTect F3 sticks picked on coherence, not amplitude; model trained on amplitude may predict correctly-located faults but score poorly because the interpreter's stick fell on the coherence anomaly center, not the amplitude event.
+  4. Gas chimneys/acoustic masking in F3 (if present in test inlines) will create label voids that inflate FN counts.
+
+- **Issue #24 (fault over-prediction) link:** If best_threshold drifts toward 0.05–0.10 after the re-run, the model is still over-predicting (low precision regime). A persistent low threshold is a signal to increase pos_weight or add harder negatives, not to accept the threshold at face value.
+

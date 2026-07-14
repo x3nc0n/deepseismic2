@@ -12,7 +12,7 @@ COPY src ./src
 
 # Install with gradio extras
 RUN pip install --no-cache-dir ".[ui]" || pip install --no-cache-dir .
-RUN pip install --no-cache-dir gradio matplotlib pillow
+RUN pip install --no-cache-dir matplotlib pillow
 
 FROM python:3.11-slim AS runtime
 

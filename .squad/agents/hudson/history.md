@@ -84,3 +84,32 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 - `ruff check` → All checks passed ✓
 - PR #29: https://github.com/x3nc0n/deepseismic2/pull/29
 
+### 2026-07-13 — Issue #37 / commit 1d184c6 — Independent Review of Dallas's Best-Checkpoint Fix
+
+**Session:** Reviewed Dallas's fix for the epoch-1-only fallback bug in `_select_best_checkpoint` (train.py).
+
+**Bug (original):** `elif not best_saved and val_metrics["loss"] < best_val_loss` — after epoch 1 saves via the loss fallback (`best_saved=True`), the guard was permanently blocked. In a 50-epoch all-zero-IoU run, `best.pt` always captured the epoch-1 checkpoint, even if later epochs achieved significantly lower loss.
+
+**Fix (1d184c6):** `elif val_metrics["iou"] >= best_val_iou and val_metrics["loss"] < best_val_loss` — fires on every epoch where IoU hasn't regressed below the best AND loss strictly improved. This correctly tracks the lowest-loss checkpoint across all epochs in the degenerate regime.
+
+**Logic verification:**
+- All-zero-IoU regime (epoch 1): `0.0 >= 0.0 and loss < inf` → saves ✓
+- All-zero-IoU regime (subsequent epochs, lower loss): `0.0 >= 0.0 and loss < prev_best_loss` → saves ✓
+- Normal run (IoU improves): IoU branch fires first via `val_metrics["iou"] > best_val_iou` ✓
+- IoU regression guard (epoch with lower IoU but better loss): `iou >= best_val_iou` → False → no overwrite ✓
+- `best.pt` ALWAYS saved (epoch 1 guarantee): any finite loss < inf with non-negative iou → saves ✓
+
+**Revert/restore test (critical check):**
+- Reverted to `not best_saved` condition temporarily
+- `test_fallback_updates_best_on_subsequent_loss_improvement_when_iou_zero` **FAILED** on old code ✓
+- `test_fallback_does_not_overwrite_better_iou_checkpoint_with_lower_loss` passed on old code (not expected to catch this specific bug)
+- Restored Dallas's fix → all 4 `TestBestCheckpointSelection` tests **PASS** ✓
+
+**Full suite results (2026-07-13):**
+- `pytest -m "not integration" -q` → **391 passed**, 2 skipped, 9 deselected ✓
+- `ruff check src/ scripts/` → All checks passed ✓
+
+**Verdict:** APPROVED. Regression test `test_fallback_updates_best_on_subsequent_loss_improvement_when_iou_zero` genuinely guards the epoch-1 bug (confirmed fail-on-old, pass-on-new). Logic is correct. Safe to release as v0.7.3.
+
+**Rule learned:** When reviewing fallback guards in epoch loops, revert/restore is mandatory — "passes with old code" is grounds for rejection, not a green flag.
+

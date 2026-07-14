@@ -176,3 +176,21 @@ Cross-survey training run blocked until F3 data is externally sourced. Issue #31
 
 **Decision:** `.squad/decisions.md` — F3 Ingest Contract (approved/in-progress).
 
+## Learnings — 2026-07-13 — v0.7.3 Release (Issue #37 — best-checkpoint loss-fallback fix)
+
+### Release steps that worked
+
+1. **Pre-flight:** `git status` revealed one unstaged file (`.squad/agents/hudson/history.md`) not mentioned in the task brief. Committed it separately as `docs(squad): hudson review notes for v0.7.3 best-checkpoint fix` before the version bump to keep history clean.
+2. **Version bump:** Only `pyproject.toml` needed bumping (0.7.2 → 0.7.3). The other `0.7.2` occurrences in Dallas's history.md were historical narrative — correctly left unchanged.
+3. **Version bump commit:** `chore(release): v0.7.3 — best-checkpoint loss-fallback fix (#37)` — matches prior `chore(release)` convention on main.
+4. **Land path:** DIRECT PUSH to `main`. `git pull --ff-only origin main` → already up to date → `git push origin main` succeeded (no branch protection blocking direct push for chore/release commits).
+5. **GitHub release:** `gh release create v0.7.3 --repo x3nc0n/deepseismic2 --title "..." --notes "..."` — succeeded immediately.
+6. **CD behavior:** Pushing `pyproject.toml` change to `main` triggered `cd.yml` immediately (status: `in_progress` within ~24s of push). CD ignores `.md`/`docs/**`/`.squad/**` — the `pyproject.toml` + `train.py` changes are what trigger it.
+7. **Infra coordination:** `gh issue comment 19 --repo Spava-Corp/deepseismic2-infra --body $body` — the `--body` flag with inline quoted string fails on PowerShell when body contains backticks/special chars. Use a here-string (`$body = @"..."@`) assigned to a variable, then pass `$body`.
+
+### Key decisions
+- `chore(release)` commits go directly to `main` (not via PR). Code-fix PRs squash-merge.
+- Infra coordination issue is `Spava-Corp/deepseismic2-infra#19` (not #21 or #23).
+- Infra re-run request: specify new `--checkpoint-upload-prefix` with a new run-id, same training flags otherwise.
+- Do NOT close app issue until infra posts re-run metrics (feeds #24).
+

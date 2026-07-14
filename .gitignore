@@ -6,6 +6,10 @@
 .squad/.scratch/
 .squad/.first-run
 
+# Impeccable design toolkit (re-installable via: npx impeccable install)
+.github/skills/impeccable/
+.github/hooks/
+
 # Squad: SubSquad activation file (local to this machine)
 .squad-workstream
 

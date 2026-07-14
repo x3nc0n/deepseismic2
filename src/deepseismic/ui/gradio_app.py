@@ -520,35 +520,6 @@ with gr.Blocks(
     gr.Markdown(f"## {TITLE}", elem_id="ds-header")
     gr.Markdown(DESCRIPTION, elem_id="ds-desc")
 
-    # ── Project browser (collapsible) ──────────────────────────────────────
-    with gr.Accordion("📂 Project Browser — ADLS Storage", open=True):
-        with gr.Row():
-            container_dd = gr.Dropdown(
-                choices=["raw", "staged", "features", "results", "catalog"],
-                value="raw",
-                label="Container",
-                interactive=True,
-                scale=1,
-            )
-            filter_box = gr.Textbox(
-                placeholder="Filter by name...",
-                label="Filter",
-                interactive=True,
-                scale=2,
-            )
-        breadcrumb = gr.Markdown("📍 **raw:** /")
-        browse_listing = gr.Dataframe(
-            headers=["Type", "Name", "Size", "Path"],
-            datatype=["str", "str", "str", "str"],
-            col_count=(4, "fixed"),
-            interactive=False,
-            label="Select a row and click Open to navigate into folders",
-        )
-        with gr.Row():
-            open_btn = gr.Button("📂 Open", size="sm", variant="primary", scale=2)
-            up_btn = gr.Button("⬆️ Up", size="sm", scale=1)
-            refresh_btn = gr.Button("🔄", size="sm", scale=1)
-
     with gr.Row():
         # ── Left column: chat ──────────────────────────────────────────────
         with gr.Column(scale=1, min_width=420, elem_id="ds-chat-col"):
@@ -640,6 +611,35 @@ with gr.Blocks(
 
     # State holding the active survey geometry + last inference run id.
     _viewer_state = gr.State({"survey_id": None, "geom": None, "run_id": None})
+
+    # ── Project browser (collapsible) — below primary workflow, closes #39 ──
+    with gr.Accordion("📂 Project Browser — ADLS Storage", open=False):
+        with gr.Row():
+            container_dd = gr.Dropdown(
+                choices=["raw", "staged", "features", "results", "catalog"],
+                value="raw",
+                label="Container",
+                interactive=True,
+                scale=1,
+            )
+            filter_box = gr.Textbox(
+                placeholder="Filter by name...",
+                label="Filter",
+                interactive=True,
+                scale=2,
+            )
+        breadcrumb = gr.Markdown("📍 **raw:** /")
+        browse_listing = gr.Dataframe(
+            headers=["Type", "Name", "Size", "Path"],
+            datatype=["str", "str", "str", "str"],
+            col_count=(4, "fixed"),
+            interactive=False,
+            label="Select a row and click Open to navigate into folders",
+        )
+        with gr.Row():
+            open_btn = gr.Button("📂 Open", size="sm", variant="primary", scale=2)
+            up_btn = gr.Button("⬆️ Up", size="sm", scale=1)
+            refresh_btn = gr.Button("🔄", size="sm", scale=1)
 
     # ── Wire up events ─────────────────────────────────────────────────────
 

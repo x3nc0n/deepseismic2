@@ -176,6 +176,27 @@ Cross-survey training run blocked until F3 data is externally sourced. Issue #31
 
 **Decision:** `.squad/decisions.md` — F3 Ingest Contract (approved/in-progress).
 
+## Learnings — 2026-07-14 — v0.8.1 Release: gradio-6 pin fix (latent dep bug in v0.8.0)
+
+### Root cause
+`pyproject.toml` [ui] extra pinned `gradio>=4.40.0` with **no upper bound**. `docker/Dockerfile.gradio` had a second unpinned `pip install gradio ...` line that overrode whatever `.[ui]` installed and resolved the **latest gradio (6.17.3)** at container build time.
+
+gradio 6 removed two APIs the app uses:
+- `gr.Chatbot(type="messages")` → `TypeError` on gradio 6 (`type=` kwarg removed). **Fatal** — crashes at module import since `demo` Blocks is built at import time.
+- `gr.Blocks(theme=..., css=...)` → silently ignored on gradio 6 (these args moved to `launch()`). **Silent data loss** — v0.8.0 UI redesign (theme + `_CUSTOM_CSS`) would never render.
+
+### Fix
+1. `pyproject.toml`: `gradio>=4.40.0` → `gradio>=4.44.0,<6` (4.44 is where `type="messages"` is solid; `<6` ceiling keeps us on the gradio 4/5 API the app targets).
+2. `docker/Dockerfile.gradio`: dropped bare `gradio` from the extra `pip install` line; `.[ui]` already installs the version-pinned gradio. `matplotlib` and `pillow` retained.
+
+### Verification (gradio 5.50.0)
+- `python -c "import deepseismic.ui.gradio_app; print('UI import OK')"` → clean, no errors or warnings
+- 391 passed, 2 skipped (non-integration pytest) ✅
+- ruff clean ✅
+
+### Foot-gun note
+**Dockerfile explicit `pip install <pkg>` lines alongside a `.[extra]` install are a foot-gun** when there is no lock file: they silently win the version race and can pull a major-version bump the pyproject constraint was never meant to allow. Always let the `pyproject.toml` bound govern; don't duplicate package installs in the Dockerfile.
+
 ## Learnings — 2026-07-13 — v0.7.3 Release (Issue #37 — best-checkpoint loss-fallback fix)
 
 ### Release steps that worked

@@ -81,22 +81,6 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 - **2026-06-29 (Ripley triage — issue #25):** Assigned to Lambert — chat wedges after truncated tool turn (AOAI 400). p0 blocker for hosted demo. Thread-state atomicity required in FoundryAgent.chat().
 
-## Learnings — 2026-07-13 (Impeccable design pass, branch squad/ui-impeccable-design)
-
-- **What Impeccable is:** A design-guidance toolkit for AI coding agents (https://impeccable.style). Installs via `npx impeccable install` — it placed a full skill set under `.github/skills/impeccable/` (SKILL.md, 20+ `/command` reference docs, detector scripts). CLI version **3.2.0** installed successfully on this project. Commands (`/typeset`, `/colorize`, `/layout`, `/audit`, etc.) are designed to run inside an AI harness (like Copilot CLI), not as standalone CLI tools against arbitrary files. The deterministic detector (`detect.mjs --json <file>`) targets HTML/CSS/JS source — returned 0 findings on `gradio_app.py` (it's Python, not CSS/HTML), so all principles were applied manually by reading the reference docs.
-- **Levers that work on a Gradio UI:** (a) the Gradio theme object (`primary_hue`, `neutral_hue`, `font`, `font_mono`, `radius_size`, `.set()` token overrides); (b) custom CSS injected via `gr.Blocks(css=...)`; (c) `elem_id` / `elem_classes` on components for stable CSS targeting; (d) copy/labels/empty-states; (e) layout composition (rows/columns/scale/min_width). Cannot hand-author arbitrary DOM — Gradio generates its own.
-- **Type/color choices:**
-  - **Heading/label font:** `Barlow Condensed` (500/600/700) — industrial precision, geological survey-report feel, not on Impeccable reflex-reject list. Loaded via `@import` in the CSS block.
-  - **Body font:** `Barlow` (Google Font via theme) — humanist sans, readable at tool density.
-  - **Mono font:** `Fira Code` (via theme) — replaces JetBrains Mono; ligature-enabled, characterful.
-  - **Primary hue:** `amber` — earthy, geological (evokes core samples and sediment cross-sections). Replaces generic `blue`.
-  - **Neutral hue:** `stone` — warm gray, coheres with amber. Replaces cold `slate`.
-  - **Secondary hue:** `teal` — subsurface/depth. Replaces `slate`.
-  - **Rationale:** Amber+Stone+Teal is intentionally domain-specific (earthy/subsurface) and avoids the purple-blue SaaS gradient Impeccable flags as AI-slop aesthetic.
-- **Key file paths:** `src/deepseismic/ui/gradio_app.py` (all changes — theme, CSS constant `_CUSTOM_CSS`, `elem_id`/`elem_classes` on components, updated copy). No separate CSS file needed; CSS string kept inline.
-- **Impeccable installation note:** Added `.github/skills/impeccable/` and `.github/hooks/impeccable.json`. These are dev tooling files; the PR body notes we should keep them (helps future design passes).
-- **Tests:** 391 passed, 2 skipped. Ruff clean. Branched from `origin/main` (not local `main`) to keep Dallas's unpushed commits out of the PR diff.
-
 - **2026-06-29 (issue #25 — atomic thread-history commit, PR #27):**
   - **Root cause (Bug B):** `FoundryAgent.chat()` (`src/deepseismic/agent/agent.py` ~L402) appended the assistant `tool_calls` message to the persistent `history` list before the matching `tool` result messages were appended. Generator `yield`s inside the tool-dispatch loop meant that the UI's 25s `break` sent `GeneratorExit` mid-round, leaving a dangling `tool_calls` entry with no tool response — every subsequent AOAI call on that process got HTTP 400. Container restart was the only recovery path.
   - **Root cause (Bug A):** `gradio_app.py` 25s guard could break mid-tool-round, cutting off tool-trace output to the user.

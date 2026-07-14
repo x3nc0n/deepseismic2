@@ -372,189 +372,96 @@ def _quick_action(action: str, history: list[dict[str, str]]) -> tuple[list[dict
 # Gradio UI definition
 # ---------------------------------------------------------------------------
 
-TITLE = "🌊 DeepSeismic Analyst"
+TITLE = "🌊 DeepSeismic Analyst — Volve Field PoC"
 DESCRIPTION = (
-    "Seismic interpretation and fault analysis for the Volve field — "
-    "Azure AI Foundry agent with real-time tool calls."
+    "**Azure AI Foundry agent** grounded by Azure AI Search over indexed seismic "
+    "knowledge and FastAPI tool calls for live run and result data.\n\n"
     + (
-        "\n\n⚠️ **MOCK MODE** — running offline; no Azure calls are made."
+        "⚠️ **MOCK MODE** — running offline; no Azure calls are made."
         if MOCK_MODE
-        else "\n\n🟢 **Live** — connected to Azure AI Foundry."
+        else "● **Live mode** — connected to Azure AI Foundry."
     )
 )
 
-# ---------------------------------------------------------------------------
-# Impeccable design pass — theme + CSS
-# ---------------------------------------------------------------------------
-# Typography rationale (/typeset): Inter replaced (Impeccable AI-tell #1).
-#   Barlow Condensed for headings/labels: industrial precision, geological
-#   survey-report feel. Barlow for body: humanist sans, readable at tool
-#   density. Fira Code for data/coords.
-# Color rationale (/colorize): amber primary (earthy/geological — evokes core
-#   samples and sediment cross-sections); stone neutral (warm gray, coheres
-#   with amber instead of cold blue-slate); teal accent (subsurface depth).
-#   Avoids the generic purple-blue SaaS gradient Impeccable warns against.
-# Layout (/layout): condensed label caps establish type hierarchy; header
-#   vertical rhythm tightened; viewer status uses tabular-nums for coords.
-
 _THEME = gr.themes.Base(
-    primary_hue=gr.themes.colors.amber,
-    secondary_hue=gr.themes.colors.teal,
-    neutral_hue=gr.themes.colors.stone,
-    font=[gr.themes.GoogleFont("Barlow"), "sans-serif"],
-    font_mono=[gr.themes.GoogleFont("Fira Code"), "monospace"],
-    text_size=gr.themes.sizes.text_md,
-    radius_size=gr.themes.sizes.radius_sm,
-).set(
-    block_label_text_weight="600",
-    block_title_text_weight="600",
-    block_border_width="1px",
-    input_border_width="1px",
+    primary_hue=gr.themes.colors.blue,
+    secondary_hue=gr.themes.colors.slate,
+    neutral_hue=gr.themes.colors.slate,
+    font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "monospace"],
 )
-
-# Custom CSS injected via gr.Blocks(css=...).  Relies on elem_id / elem_classes
-# set on individual components below for stable targeting.
-_CUSTOM_CSS = """
-/* === DeepSeismic Analyst — Impeccable Design Pass ===
- * Methodology: Impeccable /typeset, /colorize, /layout, /audit applied to
- * the Gradio theme object + custom CSS.  The deterministic detector targets
- * HTML/CSS/JS; this file is Python so it returned 0 findings — principles
- * were applied manually against the 46-rule antipattern registry.
- *
- * Fonts: Barlow Condensed (headings/labels, condensed precision)
- *        Barlow (body, via theme)   Fira Code (mono, via theme)
- * Palette: Amber primary · Stone neutral · Teal accent
- */
-
-/* Google Font: Barlow Condensed for headings; body Barlow loaded via theme */
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap');
-
-/* Semantic design tokens */
-:root {
-    --ds-font-display: 'Barlow Condensed', 'Barlow', ui-sans-serif, sans-serif;
-    --ds-track-display: 0.04em;
-    --ds-track-label: 0.08em;
-}
-
-/* ── App header: tighter vertical rhythm ─────────────────────────── */
-#ds-header .prose h2 {
-    font-family: var(--ds-font-display);
-    font-size: 1.55rem;
-    font-weight: 700;
-    letter-spacing: var(--ds-track-display);
-    text-transform: uppercase;
-    line-height: 1.05;
-    margin-bottom: 0.15rem;
-}
-#ds-desc .prose p {
-    font-size: 0.875rem;
-    line-height: 1.5;
-    margin-top: 0.1rem;
-    opacity: 0.88;
-}
-
-/* ── Block labels: condensed uppercase — clear hierarchy ─────────── */
-.block .label-wrap span {
-    font-family: var(--ds-font-display) !important;
-    font-weight: 600 !important;
-    font-size: 0.67rem !important;
-    letter-spacing: var(--ds-track-label) !important;
-    text-transform: uppercase !important;
-}
-
-/* ── Chatbot: comfortable reading density for long analyst responses ─ */
-#ds-chatbot .message {
-    line-height: 1.65;
-    font-size: 0.9rem;
-}
-
-/* ── Quick-action buttons: condensed caps → clear affordance ─────── */
-.ds-quick-btn button {
-    font-family: var(--ds-font-display) !important;
-    font-weight: 600 !important;
-    font-size: 0.7rem !important;
-    letter-spacing: 0.07em !important;
-    text-transform: uppercase !important;
-}
-
-/* ── Send button: prominent, labeled ─────────────────────────────── */
-#ds-send button {
-    font-family: var(--ds-font-display) !important;
-    font-weight: 600 !important;
-    letter-spacing: 0.05em !important;
-    text-transform: uppercase !important;
-    font-size: 0.78rem !important;
-}
-
-/* ── Viewer status: tabular-nums for coordinate/size readability ──── */
-#ds-viewer-status .prose p {
-    font-size: 0.8rem;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.01em;
-    opacity: 0.9;
-}
-
-/* ── Inference status: secondary text weight ─────────────────────── */
-#ds-infer-status .prose p {
-    font-size: 0.8rem;
-    opacity: 0.85;
-}
-
-/* ── Accordion headers: condensed label treatment ────────────────── */
-.gradio-accordion .label-wrap > span,
-details > summary span {
-    font-family: var(--ds-font-display);
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    font-size: 0.76rem;
-    text-transform: uppercase;
-}
-"""
 
 with gr.Blocks(
     title="DeepSeismic Analyst",
     theme=_THEME,
-    css=_CUSTOM_CSS,
 ) as demo:
 
-    gr.Markdown(f"## {TITLE}", elem_id="ds-header")
-    gr.Markdown(DESCRIPTION, elem_id="ds-desc")
+    gr.Markdown(f"## {TITLE}")
+    gr.Markdown(DESCRIPTION)
+
+    # ── Project browser (collapsible) ──────────────────────────────────────
+    with gr.Accordion("📂 Project Browser — ADLS Storage", open=True):
+        with gr.Row():
+            container_dd = gr.Dropdown(
+                choices=["raw", "staged", "features", "results", "catalog"],
+                value="raw",
+                label="Container",
+                interactive=True,
+                scale=1,
+            )
+            filter_box = gr.Textbox(
+                placeholder="Filter by name...",
+                label="Filter",
+                interactive=True,
+                scale=2,
+            )
+        breadcrumb = gr.Markdown("📍 **raw:** /")
+        browse_listing = gr.Dataframe(
+            headers=["Type", "Name", "Size", "Path"],
+            datatype=["str", "str", "str", "str"],
+            col_count=(4, "fixed"),
+            interactive=False,
+            label="Select a row and click Open to navigate into folders",
+        )
+        with gr.Row():
+            open_btn = gr.Button("📂 Open", size="sm", variant="primary", scale=2)
+            up_btn = gr.Button("⬆️ Up", size="sm", scale=1)
+            refresh_btn = gr.Button("🔄", size="sm", scale=1)
 
     with gr.Row():
         # ── Left column: chat ──────────────────────────────────────────────
-        with gr.Column(scale=1, min_width=420, elem_id="ds-chat-col"):
+        with gr.Column(scale=1, min_width=420):
             chatbot = gr.Chatbot(
-                label="Analyst Chat",
+                label="Agent Conversation",
                 type="messages",
-                elem_id="ds-chatbot",
             )
 
             with gr.Row():
                 msg_box = gr.Textbox(
-                    placeholder="Ask about surveys, wells, fault runs, or interpretation results…",
-                    label="Message",
+                    placeholder="Ask about the Volve survey, runs, wells, or results...",
+                    label="Your message",
                     lines=2,
                     scale=4,
                     show_label=False,
                 )
-                send_btn = gr.Button("Send ↩", scale=1, variant="primary", elem_id="ds-send")
+                send_btn = gr.Button("Send", scale=1, variant="primary")
 
             with gr.Row():
-                btn_status = gr.Button("Status", size="sm", elem_classes=["ds-quick-btn"])
-                btn_wells = gr.Button("Wells", size="sm", elem_classes=["ds-quick-btn"])
-                btn_analyze = gr.Button("Full Analysis", size="sm", elem_classes=["ds-quick-btn"])
+                btn_status = gr.Button("Status", size="sm")
+                btn_wells = gr.Button("Wells", size="sm")
+                btn_analyze = gr.Button("Full Analysis", size="sm")
 
             persona_dd = gr.Dropdown(
                 choices=["Auto", "Geophysics (Ash)", "Geology (Kane)", "Geoengineering (Brett)"],
                 value="Auto",
-                label="Analyst Perspective",
+                label="Domain Perspective",
                 interactive=True,
             )
 
             clear_btn = gr.Button("Clear Chat", size="sm", variant="secondary")
 
         # ── Right column: seismic viewer ───────────────────────────────────
-        with gr.Column(scale=1, min_width=420, elem_id="ds-viewer-col"):
+        with gr.Column(scale=1, min_width=420):
             with gr.Row():
                 survey_dd = gr.Dropdown(
                     choices=[],
@@ -565,16 +472,12 @@ with gr.Blocks(
                 refresh_surveys_btn = gr.Button("🔄", size="sm", scale=1)
 
             seismic_image = gr.Image(
-                label="Inline Section",
+                label="Seismic Inline Viewer",
                 type="numpy",
                 height=400,
             )
 
-            viewer_status = gr.Markdown(
-                "_Select a survey above to load inline sections — "
-                "use the slider to navigate._",
-                elem_id="ds-viewer-status",
-            )
+            viewer_status = gr.Markdown("_Select a survey to load real amplitudes._")
 
             with gr.Row():
                 inline_slider = gr.Slider(
@@ -603,43 +506,12 @@ with gr.Blocks(
                     )
                     check_infer_btn = gr.Button("Check status", scale=1)
                 infer_status = gr.Markdown(
-                    f"_Select a survey and click **Run fault detection** to start "
-                    f"UNet3D inference. Results overlay onto the section "
-                    f"(checkpoint: `{CHECKPOINT_BLOB}`)._",
-                    elem_id="ds-infer-status",
+                    "_Runs the UNet3D model on the selected survey via the API "
+                    f"(checkpoint `{CHECKPOINT_BLOB}`). Results overlay onto the section._"
                 )
 
     # State holding the active survey geometry + last inference run id.
     _viewer_state = gr.State({"survey_id": None, "geom": None, "run_id": None})
-
-    # ── Project browser (collapsible) — below primary workflow, closes #39 ──
-    with gr.Accordion("📂 Project Browser — ADLS Storage", open=False):
-        with gr.Row():
-            container_dd = gr.Dropdown(
-                choices=["raw", "staged", "features", "results", "catalog"],
-                value="raw",
-                label="Container",
-                interactive=True,
-                scale=1,
-            )
-            filter_box = gr.Textbox(
-                placeholder="Filter by name...",
-                label="Filter",
-                interactive=True,
-                scale=2,
-            )
-        breadcrumb = gr.Markdown("📍 **raw:** /")
-        browse_listing = gr.Dataframe(
-            headers=["Type", "Name", "Size", "Path"],
-            datatype=["str", "str", "str", "str"],
-            col_count=(4, "fixed"),
-            interactive=False,
-            label="Select a row and click Open to navigate into folders",
-        )
-        with gr.Row():
-            open_btn = gr.Button("📂 Open", size="sm", variant="primary", scale=2)
-            up_btn = gr.Button("⬆️ Up", size="sm", scale=1)
-            refresh_btn = gr.Button("🔄", size="sm", scale=1)
 
     # ── Wire up events ─────────────────────────────────────────────────────
 

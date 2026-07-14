@@ -110,3 +110,11 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 
 - **Issue #24 (fault over-prediction) link:** If best_threshold drifts toward 0.05–0.10 after the re-run, the model is still over-predicting (low precision regime). A persistent low threshold is a signal to increase pos_weight or add harder negatives, not to accept the threshold at face value.
 
+
+## Learnings — 2026-07-14 Session (Issue #37 Metric Review + v0.7.3 Gate)
+
+- **Issue #37 Metric Validation:** Confirmed AP (PR-AUC) primary for sparse fault task. Single global threshold sweep appropriate for PoC. Target ranges: "clearly learning" AP 0.08–0.20, "competent PoC" AP 0.20–0.45. Documented geophysical gotchas (dilation mismatch, amplitude-vs-attribute offset, inline split bias, label sparsity floor). Best_threshold diagnostic: ≤0.10 persistent → over-prediction signal.
+
+- **v0.7.3 Approval Gate:** Logic review + regression guard verified. 5 scenarios pass; full suite 391 passed. APPROVED. Issue #37 OPEN pending re-run results.
+
+

@@ -10,6 +10,15 @@
 
 ## Recent Sessions
 
+### 2026-07-14 — v0.7.3 Verification Gate (Issue #37 Best-Checkpoint Fix)
+- Independent review of Dallas's commit 1d184c6: logic sound, regression guard genuine (fails on old code, passes on new)
+- Verified all 5 scenario cases (all-zero IoU epochs, normal runs, regression cases)
+- Full suite: 391 passed, 2 skipped, 9 deselected; ruff clean; leakage-gate test included
+- APPROVED for release as v0.7.3; cleared path for infra T4 re-run
+- Decision merged to squad decisions.md
+
+## Recent Sessions (older)
+
 ### 2026-06-29 — v0.6.5 Release (CI Fix — unblocked merge pipeline)
 - PR #29 merged: Fixed pre-existing pytest collection error in test_f3_ingest.py
 - Root cause: scripts/ not in pythonpath when imports evaluated

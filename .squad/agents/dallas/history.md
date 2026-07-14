@@ -72,3 +72,11 @@ Released v0.4.0 with API/agent de-mock and real-data readiness. Integrated with 
 - Training: `src/deepseismic/training/train.py` — `validate()`, `_sweep_threshold_metrics`, `_select_best_checkpoint`
 - Tests: `src/tests/test_training/test_sprint2_training.py` — `TestValidationThresholdSweep`, `TestBestCheckpointSelection`
 
+
+## Learnings — 2026-07-14 Session (v0.7.3 + F3 Ingest)
+
+- **v0.7.3 Best-Checkpoint Loss-Fallback Fix (commit 1d184c6):** Fixed _select_best_checkpoint() bug where the `not best_saved` guard permanently blocked after epoch 1, causing best.pt to capture epoch-1 (worst-loss) instead of true best-by-loss in all-zero-IoU runs. New guard: `val_metrics["iou"] >= best_val_iou and val_metrics["loss"] < best_val_loss`. 2 regression tests added; Hudson verified (test fails on old code, passes on new); all 391 tests pass, ruff clean. Released as v0.7.3; infra re-run requested (deepseismic2-infra#19).
+
+- **F3 Real-Data Ingest Fixes (PR #32, merged):** Irregular SEG-Y fallback (broadened error detection), F3 native fault format (parse_f3_fault_sticks), corner-point georeference extraction. 12 regression tests; all 18 F3 fault points inside volume bounds. Ready for real F3 ingestion.
+
+

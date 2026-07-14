@@ -10,6 +10,18 @@
 
 ## Recent Sessions
 
+### 2026-07-14 — v0.8.0 UI Redesign (Impeccable Theming + Geoscience Visual Identity)
+- Delivered PR #40 (merged): Impeccable-guided Gradio UI overhaul
+- Typography: Barlow Condensed (headings, uppercase) + Barlow (body) + Fira Code (mono) — replaced Inter defaults
+- Color palette: Amber (primary, earthy/geological) + Stone (neutral, warm gray) + Teal (secondary, depth) — replaced blue/slate
+- Copy refinement: "Agent Conversation" → "Analyst Chat", "Seismic Inline Viewer" → "Inline Section", improved affordance labels
+- CSS surface: Custom _CUSTOM_CSS injected via gr.Blocks(css=...), stable elem_id/elem_classes for future audits
+- Impeccable toolkit untracked (gitignored), skill doc kept for future design passes
+- Issue #39 (storage browser reposition) intentionally deferred; tracked separately
+- v0.8.0 shipped with new visual identity; decision merged to squad decisions.md
+
+## Recent Sessions (older)
+
 ### 2026-06-29 — v0.6.5 Release (Issue #25 fix — atomic commit)
 - PR #27 merged: Fixed FoundryAgent.chat() thread-state corruption (p0 blocker)
 - Implemented atomic round_buffer + try/finally commit + _seal_dangling_tool_calls() self-heal

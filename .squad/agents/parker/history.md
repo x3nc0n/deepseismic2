@@ -10,6 +10,29 @@
 
 ## Recent Sessions
 
+### 2026-07-14 — v0.7.3 + v0.8.0 + v0.8.1 Triple Release (ML Fix, UI Redesign, Emergency Patch)
+
+**v0.7.3 (ML Fix):**
+- Bumped pyproject.toml 0.7.2 → 0.7.3; committed version bump to main
+- Tagged GitHub release; CD built + pushed ghcr.io images (latest + sha)
+- Notified infra (deepseismic2-infra#19) of v0.7.3 availability, requested warm T4 rebuild + 50-epoch F3 re-run
+- Issue #37 left OPEN pending re-run results
+
+**v0.8.0 (UI Redesign):**
+- Merged PR #40 (Lambert's Impeccable UI redesign: Barlow typography, amber/stone/teal palette, improved copy)
+- CD validated (391 tests pass, ruff clean)
+
+**v0.8.1 (Emergency Patch — Gradio 6 Container Boot Crisis):**
+- Post-release smoke testing: deployed UI container would not boot
+- Root cause: pyproject.toml had gradio>=4.40.0 (no ceiling); docker/Dockerfile.gradio had explicit pip install gradio that won version race → resolved gradio 6.17.3 which removed gr.Chatbot(type=) and relocated Blocks(theme=, css=)
+- Decision: Pin <6, do NOT migrate gradio 6 now (too large for emergency patch)
+- Changed pyproject.toml [ui] to gradio>=4.44.0,<6; removed explicit gradio install from Dockerfile
+- Verified: gradio 5.50.0 resolves cleanly; UI imports, 391 tests pass, ruff clean
+- Created .squad/skills/dockerfile-dep-pinning/SKILL.md documenting the Dockerfile unpinned-install foot-gun
+- Gradio 6 migration opened as separate feature-branch task
+
+**CD Status:** All three releases validated (ghcr.io images built + pushed, 391 tests, ruff clean)
+
 ### 2026-06-29 — v0.6.5 Release (Issue #26 fix — HNS-safe prefix lookup)
 - PR #28 merged: Fixed _resolve_run_id() 404 on ADLS/HNS containers (p1 workaround available)
 - Implemented catalog index.json (exact download, HNS-safe) + pending manifest at submit
